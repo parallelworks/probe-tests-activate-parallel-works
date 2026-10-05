@@ -33,12 +33,3 @@ other changes. `python3 -m probe list --tests <path to tests/>`, run from `workf
 of a `parallelworks/workflows` checkout, validates the files. Commit, push, and press
 `Refresh` on the dashboard. A removed test keeps its history in the bucket until
 `Delete results` on the admin dashboard.
-
-Most tests were imported from `workflows/<name>/tests/general/` of `parallelworks/workflows`.
-The import overwrites files of the same name, so change those tests there as well:
-
-```bash
-cd /path/to/workflows
-python3 workflows/probe/scripts/import_workflow_tests.py . --variant general \
-    --platform activate.parallel.works --user alvaro --out /path/to/probe-tests-activate-parallel-works/tests
-```
