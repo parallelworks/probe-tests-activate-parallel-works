@@ -1,26 +1,20 @@
 name: Run PROBE tests
 
-# Runs workflow/run-tests.yaml on the platform: all tests of the platform and
-# user, or the listed test files. Results go to the bucket as each test finishes;
-# open the dashboard and press Refresh to see them. Manual only; a `schedule`
-# trigger can be added here to run it periodically.
+# Runs workflows/probe/yamls/general_run_tests.yaml of parallelworks/workflows on the
+# platform with the test definitions of this branch: all of them, or the listed test
+# files. Results go to the bucket as each test finishes; open the dashboard and press
+# Refresh to see them. Manual only; a `schedule` trigger can be added here to run it
+# periodically.
 on:
   workflow_dispatch:
     inputs:
-      platform:
-        description: 'Platform host'
-        required: true
-        type: choice
-        options:
-          - activate.parallel.works
-          - activate.hpc.mil
       resource:
         description: 'Resource the tests are launched from (e.g. pw://alvaro/user-workspace)'
         required: true
         default: 'pw://alvaro/gcpsmall'
         type: string
       selection:
-        description: 'all, or test files relative to the tests directory separated by spaces'
+        description: 'all, or test files relative to tests/ separated by spaces'
         required: false
         default: 'all'
         type: string
@@ -34,20 +28,10 @@ on:
         required: false
         default: 'probe/results'
         type: string
-      tests_repo:
-        description: 'Repository holding the test definitions (default: this repository)'
+      workflows_ref:
+        description: 'Branch, tag or commit of parallelworks/workflows to take the PROBE workflow from'
         required: false
-        default: ''
-        type: string
-      tests_branch:
-        description: 'Branch of the tests repository (default: the branch this action runs from)'
-        required: false
-        default: ''
-        type: string
-      tests_directory:
-        description: 'Directory of test definitions inside the repository'
-        required: false
-        default: 'tests'
+        default: 'canary'
         type: string
       wait:
         description: 'Wait for the tests and fail this job when one fails'
@@ -59,19 +43,24 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      PW_PLATFORM_HOST: ${{ inputs.platform }}
+      PW_PLATFORM_HOST: activate.parallel.works
+      # The CLI takes its credential from the environment (pw auth --help)
+      PW_API_KEY: ${{ secrets.ACTIVATE_PARALLEL_WORKS }}
       RESOURCE: ${{ inputs.resource }}
       BUCKET: ${{ inputs.bucket }}
       BUCKET_PATH: ${{ inputs.bucket_path || 'probe/results' }}
       SELECTION: ${{ inputs.selection || 'all' }}
-      TESTS_REPO: ${{ inputs.tests_repo }}
-      TESTS_BRANCH: ${{ inputs.tests_branch }}
-      TESTS_DIRECTORY: ${{ inputs.tests_directory || 'tests' }}
+      WORKFLOWS_REF: ${{ inputs.workflows_ref || 'canary' }}
       WAIT: ${{ inputs.wait }}
-      THIS_REPO: ${{ github.server_url }}/${{ github.repository }}.git
-      THIS_BRANCH: ${{ github.ref_name }}
+      TESTS_REPO: ${{ github.server_url }}/${{ github.repository }}.git
+      TESTS_BRANCH: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the PROBE workflow
+        uses: actions/checkout@v4
+        with:
+          repository: parallelworks/workflows
+          ref: ${{ inputs.workflows_ref || 'canary' }}
+          sparse-checkout: workflows/probe/yamls
 
       - name: Install pw CLI
         run: |
@@ -80,29 +69,16 @@ jobs:
           chmod +x ~/bin/pw
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Authenticate pw CLI
-        env:
-          KEY_PARALLEL_WORKS: ${{ secrets.ACTIVATE_PARALLEL_WORKS }}
-          KEY_HPC_MIL: ${{ secrets.ACTIVATE_HPC_MIL }}
-        run: |
-          case "${PW_PLATFORM_HOST}" in
-            activate.hpc.mil) pw auth apikey "${KEY_HPC_MIL}" ;;
-            *) pw auth apikey "${KEY_PARALLEL_WORKS}" ;;
-          esac
-
       - name: Create inputs.json
         run: |
           python3 - <<'EOF'
           import json, os
           env = os.environ
           inputs = {
-              "resource": env["RESOURCE"],
+              "cluster": {"resource": env["RESOURCE"]},
               "selection": env["SELECTION"],
-              "tests": {"repo": env["TESTS_REPO"] or env["THIS_REPO"],
-                        "branch": env["TESTS_BRANCH"] or env["THIS_BRANCH"],
-                        "directory": env["TESTS_DIRECTORY"]},
+              "tests": {"repo": env["TESTS_REPO"], "branch": env["TESTS_BRANCH"], "directory": "tests"},
               "results": {"bucket": env["BUCKET"], "path": env["BUCKET_PATH"]},
-              "code": {"repo": env["THIS_REPO"], "branch": env["THIS_BRANCH"]},
           }
           json.dump(inputs, open("inputs.json", "w"), indent=2)
           print(json.dumps(inputs, indent=2))
@@ -111,20 +87,17 @@ jobs:
       - name: Run the tests
         run: |
           pw workflows run --trust -o json \
-            --name "PROBE tests (${{ github.ref_name }}, ${{ github.event_name }})" \
-            -i inputs.json "$GITHUB_WORKSPACE/workflow/run-tests.yaml" | tee run.json
+            --name "PROBE tests (${TESTS_BRANCH}, workflows@${WORKFLOWS_REF})" \
+            -i inputs.json "$GITHUB_WORKSPACE/workflows/probe/yamls/general_run_tests.yaml" | tee run.json
           SLUG=$(python3 -c "import json; raw=open('run.json').read(); print(json.JSONDecoder().raw_decode(raw[raw.index('{'):])[0]['run']['slug'])")
           echo "::notice::Platform run ${SLUG}: pw workflows runs view ${SLUG}"
           if [ "${WAIT}" != "true" ]; then
             exit 0
           fi
           while :; do
-            STATUS=$(pw workflows runs view -o json "${SLUG}" 2>/dev/null | python3 -c "import json,sys
-raw = sys.stdin.read()
-try:
-    print(json.JSONDecoder().raw_decode(raw[raw.index('{'):])[0].get('status', ''))
-except Exception:
-    print('')")
+            # The CLI may print an upgrade notice before the JSON document
+            STATUS=$(pw workflows runs view -o json "${SLUG}" 2>/dev/null \
+              | python3 -c "import json,sys; raw=sys.stdin.read(); print(json.JSONDecoder().raw_decode(raw[raw.index('{'):])[0].get('status', '') if '{' in raw else '')" 2>/dev/null)
             case "${STATUS}" in
               completed)
                 echo "All tests passed."
