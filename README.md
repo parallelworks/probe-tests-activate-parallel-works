@@ -16,7 +16,8 @@ and by `Refresh` on the dashboard. Results go to `pw://alvaro/gcpbucket` under `
 ## Run the tests
 
 - **Run PROBE tests** (GitHub action): runs all tests, or the files listed in `selection`,
-  on the platform and fails when a test fails.
+  on the platform. Failed tests are listed in the job summary; the job fails only when the
+  suite could not run.
 - **Start PROBE dashboard** (GitHub action): starts the dashboards. `Run all` and
   `Rerun test` on the admin dashboard (`probe-admin-<run slug>`) launch tests. Stop the
   dashboards with `pw endpoints delete probe-<run slug>` and `probe-admin-<run slug>`.
