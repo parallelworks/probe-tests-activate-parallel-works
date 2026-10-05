@@ -71,7 +71,7 @@ same name, so change or remove such a test there as well:
 ```bash
 cd /path/to/workflows
 python3 workflows/probe/scripts/import_workflow_tests.py . --variant general \
-    --platform activate.parallel.works --user alvaro --out /path/to/workflow-tester-tool/tests
+    --platform activate.parallel.works --user alvaro --out /path/to/probe-tests-activate-parallel-works/tests
 ```
 
 ## Test definition
