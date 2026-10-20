@@ -19,8 +19,8 @@
   ],
   "setup": "mkdir -p $HOME/pw/tests/rag-docs && printf '%s\\n' '# Zephyr cluster runbook' 'The zephyr scratch quota is 42 terabytes per project.' > $HOME/pw/tests/rag-docs/zephyr.md && printf '%s\\n' '# Tarragon protocol' 'The tarragon handshake requires exactly nine retries and listens on port 7777.' > $HOME/pw/tests/rag-docs/tarragon.md",
   "inputs": {
+    "resource": "pw://alvaro/gcpsmall",
     "cluster": {
-      "resource": "pw://alvaro/gcpsmall",
       "scheduler": false
     },
     "service": {
