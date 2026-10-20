@@ -18,9 +18,9 @@
     "pw endpoints"
   ],
   "inputs": {
+    "resource": "pw://alvaro/awsgpu",
     "runtype": "vllm",
     "cluster": {
-      "resource": "pw://alvaro/awsgpu",
       "scheduler": false
     },
     "model": {

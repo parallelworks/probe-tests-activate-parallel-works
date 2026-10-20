@@ -16,8 +16,8 @@
     "pw endpoints run"
   ],
   "inputs": {
+    "resource": "pw://alvaro/gcpsmall",
     "cluster": {
-      "resource": "pw://alvaro/gcpsmall",
       "scheduler": false
     },
     "service": {}

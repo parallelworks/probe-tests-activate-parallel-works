@@ -18,9 +18,9 @@
     "pw endpoints"
   ],
   "inputs": {
+    "resource": "pw://alvaro/a30gpuserver",
     "runtype": "vllm",
     "cluster": {
-      "resource": "pw://alvaro/a30gpuserver",
       "scheduler": false
     },
     "model": {
