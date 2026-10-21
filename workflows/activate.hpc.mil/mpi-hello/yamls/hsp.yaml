@@ -1,0 +1,552 @@
+# yaml-language-server: $schema=https://activate.parallel.works/workflow.schema.json
+# An MPI hello world as a batch job on an HSP (activate.hpc.mil) cluster, the
+# smallest test that the cluster's MPI works through the platform: preprocessing,
+# on the login node, writes the MPI environment file from the form's commands
+# (module load ...), compiles mpi_hello.c with mpicc and writes the job script;
+# the hsp script submitter runs it as one SLURM or PBS job of nodes x ranks per
+# node (or on the login node), streaming its output to the run log; a check step
+# reads the exit status the script recorded, counts the ranks that said hello and
+# the nodes they ran on, and checks the Allreduce the ranks did. The run completes
+# when every rank reported and fails loud otherwise. No endpoint, nothing installed,
+# nothing left behind.
+#
+# Self-contained on purpose: the C source and the scripts are written by
+# preprocessing from this file, so the run checks nothing out of its own; only the
+# script submitter is fetched from github.com/parallelworks/workflows (canary).
+permissions:
+  - '*'
+
+jobs:
+  preprocessing:
+    ssh:
+      remoteHost: ${{ inputs.resource.ip }}
+    steps:
+      - name: Create Inputs
+        run: |
+          set -e
+          env | grep '^PW_' | grep -v 'PW_API_KEY' > inputs.sh
+          sed -i 's/=\(.*\)/="\1"/' inputs.sh
+          cat <<'EOF' >> inputs.sh
+          mpi_launcher="${{ inputs.mpi.launcher }}"
+          mpi_scheduler="${{ inputs.cluster.scheduler }}"
+          mpi_nodes="${{ inputs.cluster.nodes }}"
+          mpi_ntasks_per_node="${{ inputs.cluster.ntasks_per_node }}"
+          EOF
+          # a hidden or empty input renders as nothing or undefined: drop those lines
+          sed -i '/=\s*$\|=undefined\s*$\|=""\s*$\|="undefined"\s*$/d' inputs.sh
+          sed -i 's/^/export /' inputs.sh
+          source inputs.sh
+          if ! [[ "${mpi_ntasks_per_node:-}" =~ ^[0-9]+$ ]] || [ "${mpi_ntasks_per_node}" -lt 1 ]; then
+            echo "::error::MPI ranks per node must be a positive integer, got '${mpi_ntasks_per_node:-}'"
+            exit 1
+          fi
+          # nodes is hidden, so unset, when the job is not scheduled: one node then
+          if [ -n "${mpi_nodes:-}" ] && { ! [[ "${mpi_nodes}" =~ ^[0-9]+$ ]] || [ "${mpi_nodes}" -lt 1 ]; }; then
+            echo "::error::Nodes must be a positive integer, got '${mpi_nodes}'"
+            exit 1
+          fi
+          if [ -z "${mpi_launcher:-}" ]; then
+            echo "::error::The MPI launcher is empty; give the command up to its process-count option, for example mpirun -np"
+            exit 1
+          fi
+          cat inputs.sh
+          echo "JOB_DIR=${PWD}" | tee -a $OUTPUTS
+      # one file the compile step and the job script source: module initialized for a
+      # non-login shell, then the form's commands, or the first known MPI when none were
+      # given. Checked in a fresh shell, so a missing MPI fails the run before anything
+      # is queued
+      - name: Prepare the MPI Environment
+        run: |
+          set -e
+          source inputs.sh
+          cat > mpi-load.txt <<'PW_LOAD_EOF'
+          ${{ inputs.mpi.load }}
+          PW_LOAD_EOF
+          sed -i '/^[[:space:]]*undefined[[:space:]]*$/d' mpi-load.txt
+          cat <<'EOF' > mpi-env.sh
+          # MPI environment: module initialized for a non-login shell, then what provides MPI
+          if ! command -v module > /dev/null 2>&1; then
+              for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /etc/profile.d/z00_lmod.sh \
+                       "${MODULESHOME:-/nonexistent}/init/bash" "${LMOD_PKG:-/nonexistent}/init/bash" \
+                       /usr/share/lmod/lmod/init/bash /usr/share/Modules/init/bash; do
+                  if [ -r "${f}" ]; then
+                      source "${f}"
+                      break
+                  fi
+              done
+          fi
+          # the HPCMP site module directories: a login shell has them on MODULEPATH, a
+          # workflow step may not (FRAN keeps mpi/latest in /p/app/modulefiles)
+          if command -v module > /dev/null 2>&1; then
+              for d in /p/app/modulefiles /p/app/site/modulefiles; do
+                  if [ -d "${d}" ]; then
+                      case ":${MODULEPATH:-}:" in
+                          *":${d}:"*) ;;
+                          *) module use "${d}" > /dev/null 2>&1 || true ;;
+                      esac
+                  fi
+              done
+          fi
+          EOF
+          launcher_cmd="${mpi_launcher%% *}"
+          # does a fresh shell that sources mpi-env.sh and runs the snippet have mpicc and the launcher?
+          f_provides() {
+            bash -c "source '${PWD}/mpi-env.sh' && ${1} && command -v mpicc && command -v '${launcher_cmd}'" 2>&1
+          }
+          if [ -n "$(tr -d '[:space:]' < mpi-load.txt)" ]; then
+            cat mpi-load.txt >> mpi-env.sh
+            if ! out=$(f_provides true); then
+              echo "::error title=Error::Sourcing mpi-env.sh does not provide mpicc and ${launcher_cmd}; the MPI environment commands and the output follow"
+              cat mpi-load.txt
+              echo "${out}"
+              exit 1
+            fi
+            echo "::notice::MPI: the environment commands from the form provide $(echo "${out}" | tr '\n' ' ')"
+          else
+            # the MPI already on PATH, else the first known module that provides one
+            found=""
+            if out=$(f_provides true); then
+              found="the mpicc and ${launcher_cmd} already on PATH"
+            else
+              for mod in mpi/latest mpich/gnu mpi/mpich-x86_64 mpi/openmpi-x86_64 openmpi mpich; do
+                if out=$(f_provides "module load ${mod} > /dev/null 2>&1"); then
+                  echo "module load ${mod}" >> mpi-env.sh
+                  found="the module ${mod}"
+                  break
+                fi
+              done
+            fi
+            if [ -z "${found}" ]; then
+              echo "::error title=Error::No MPI found: nothing on PATH provides mpicc and ${launcher_cmd}, and none of the known modules (mpi/latest, mpich/gnu, mpi/mpich-x86_64, mpi/openmpi-x86_64, openmpi, mpich) loads; give the environment commands in the form"
+              exit 1
+            fi
+            echo "::notice::MPI: using ${found}: $(echo "${out}" | tr '\n' ' ')"
+          fi
+          echo "--- mpi-env.sh"
+          cat mpi-env.sh
+      - name: Compile the MPI Hello World
+        run: |
+          set -eo pipefail
+          cat <<'EOF' > mpi_hello.c
+          /* Every rank says hello with its processor name, then the ranks sum their
+             numbers with MPI_Allreduce: a collective that fails when the ranks cannot
+             talk to each other, which hello lines alone would not show. */
+          #include <mpi.h>
+          #include <stdio.h>
+
+          int main(int argc, char **argv) {
+              int rank, size, len, sum = 0, expected;
+              char name[MPI_MAX_PROCESSOR_NAME];
+              MPI_Init(&argc, &argv);
+              MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+              MPI_Comm_size(MPI_COMM_WORLD, &size);
+              MPI_Get_processor_name(name, &len);
+              printf("Hello world from processor %s, rank %d out of %d processors\n", name, rank, size);
+              fflush(stdout);
+              MPI_Allreduce(&rank, &sum, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+              expected = size * (size - 1) / 2;
+              if (rank == 0) {
+                  printf("Allreduce of the ranks: %d (expected %d): %s\n", sum, expected,
+                         sum == expected ? "OK" : "WRONG");
+                  fflush(stdout);
+              }
+              if (sum != expected) {
+                  MPI_Abort(MPI_COMM_WORLD, 1);
+              }
+              MPI_Finalize();
+              return 0;
+          }
+          EOF
+          source mpi-env.sh
+          mpicc -O2 -o mpi_hello mpi_hello.c
+          echo "::notice::Compiled mpi_hello with $(command -v mpicc)"
+      # the submitter never forwards the script's exit status: the script records it
+      # in mpi-hello.exit for the check step. Not named run.sh: the submitter writes
+      # its assembled job script under that name in the same directory
+      - name: Create the Job Script
+        run: |
+          set -e
+          rm -f mpi-hello.exit mpi-hello.out mpi-hello.layout
+          # run on every node of a SLURM job before the launch: the address a node's
+          # hostname resolves to is the one MPI launchers connect through
+          cat <<'EOF' > node-info.sh
+          #!/bin/bash
+          addr=$(getent hosts "$(hostname)" 2> /dev/null | awk '{print $1; exit}')
+          ifaces=$(ip -o -4 addr show 2> /dev/null | awk '{printf "%s=%s ", $2, $4}')
+          echo "  $(hostname): resolves to ${addr:-?}; interfaces ${ifaces:-unknown}"
+          EOF
+          {
+            cat inputs.sh
+            cat <<'EOF'
+          set -o pipefail
+          job_dir="${PWD}"
+          trap 'echo $? > "${job_dir}/mpi-hello.exit"' EXIT
+          # scancel and qdel send SIGTERM; without these the exit trap would record
+          # the status of the last command that completed before the kill, which is 0
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          set -e
+          source "${job_dir}/mpi-env.sh"
+
+          # the rank layout comes from the allocation, on the login node from the form
+          if [ -n "${SLURM_JOB_ID:-}" ]; then
+              nodes="${SLURM_JOB_NUM_NODES}"
+              np="${SLURM_NTASKS:-$(( SLURM_JOB_NUM_NODES * ${SLURM_NTASKS_PER_NODE:-${mpi_ntasks_per_node}} ))}"
+          elif [ -n "${PBS_NODEFILE:-}" ]; then
+              nodes=$(sort -u "${PBS_NODEFILE}" | wc -l)
+              np=$(wc -l < "${PBS_NODEFILE}")
+          else
+              nodes=1
+              np="${mpi_ntasks_per_node}"
+          fi
+          # the layout actually launched, for the check: a directive typed in the form
+          # can change it from nodes x ranks per node
+          echo "${np} ${nodes}" > "${job_dir}/mpi-hello.layout"
+          read -r -a launcher <<< "${mpi_launcher}"
+          # bounded: ranks that cannot reach each other hang in the Allreduce, and on
+          # the login node no walltime would end them
+          cmd=(timeout -k 30 300 "${launcher[@]}" "${np}" "${job_dir}/mpi_hello")
+          mpi_version="$( (mpichversion 2> /dev/null || mpirun --version 2> /dev/null) | head -n 1 )" || true
+
+          echo "Host     : $(hostname)${SLURM_JOB_NODELIST:+, SLURM job ${SLURM_JOB_ID} on ${SLURM_JOB_NODELIST}}${PBS_JOBID:+, PBS job ${PBS_JOBID}}"
+          echo "MPI      : $(command -v mpicc)${mpi_version:+ (${mpi_version})}"
+          echo "Ranks    : ${np} on ${nodes} node(s)"
+          if [ -n "${SLURM_JOB_ID:-}" ]; then
+              # what a launcher choice depends on: SLURM's PMI plugins for srun --mpi=...,
+              # the nodes' addresses for mpirun's proxies (and its -iface option)
+              echo "PMI      : $(srun --mpi=list 2>&1 | tr '\n' ' ')"
+              echo "Nodes    :"
+              srun -N "${nodes}" --ntasks-per-node=1 bash "${job_dir}/node-info.sh" 2>&1 || true
+          fi
+          echo "Command  : ${cmd[*]}"
+          echo "Started  : $(date)"
+          echo
+          # in the background and waited for: bash runs a trap at once while in wait
+          # but only after a foreground pipeline ends; the subshell carries pipefail
+          # so the status waited for is the program's, not tee's
+          ( set -o pipefail; "${cmd[@]}" 2>&1 | tee "${job_dir}/mpi-hello.out" ) &
+          wait $!
+          echo
+          echo "Finished : $(date)"
+          EOF
+          } > mpi-hello.sh
+          cat mpi-hello.sh
+
+  mpi_job:
+    needs: [preprocessing]
+    ssh:
+      remoteHost: ${{ inputs.resource.ip }}
+    steps:
+      - name: Run the MPI Hello World
+        uses: github/parallelworks/workflows@canary
+        with:
+          $yaml: workflows/script_submitter/v3.6/hsp.yaml
+          resource: ${{ inputs.resource }}
+          shebang: '#!/bin/bash'
+          # the submitter cds into the run's job directory, where mpi-hello.sh and mpi_hello are
+          rundir: ${{ env.PW_PARENT_JOB_DIR }}
+          use_existing_script: true
+          script_path: ./mpi-hello.sh
+          define_cleanup_script: false
+          scheduler: ${{ inputs.cluster.scheduler }}
+          use_scheduler_agent: false
+          submit_and_exit: false
+          slurm:
+            is_enabled: ${{ inputs.cluster.slurm.is_enabled }}
+            account: ${{ inputs.cluster.slurm.account }}
+            partition: ${{ inputs.cluster.slurm.partition }}
+            qos: ${{ inputs.cluster.slurm.qos }}
+            # on `existing` resources the hsp submitter writes these before the
+            # directives below, which repeat --nodes and add --ntasks-per-node
+            cpus_per_task: 1
+            nodes: ${{ inputs.cluster.nodes }}
+            node_type: ${{ inputs.cluster.slurm.node_type }}
+            time: ${{ inputs.cluster.slurm.time }}
+            # the layout goes first so a directive typed in the form can still override
+            # it: sbatch and qsub keep the last value of a repeated option
+            scheduler_directives: |
+              #SBATCH --nodes=${{ inputs.cluster.nodes }}
+              #SBATCH --ntasks-per-node=${{ inputs.cluster.ntasks_per_node }}
+              ${{ inputs.cluster.slurm.scheduler_directives }}
+          pbs:
+            is_enabled: ${{ inputs.cluster.pbs.is_enabled }}
+            account: ${{ inputs.cluster.pbs.account }}
+            scheduler_directives: |
+              #PBS -l select=${{ inputs.cluster.nodes }}:ncpus=${{ inputs.cluster.ntasks_per_node }}:mpiprocs=${{ inputs.cluster.ntasks_per_node }}
+              ${{ inputs.cluster.pbs.scheduler_directives }}
+      - name: Check the Results
+        run: |
+          set -o pipefail
+          cd "${{ needs.preprocessing.outputs.JOB_DIR }}"
+          source inputs.sh
+          if [ ! -f mpi-hello.exit ]; then
+            echo "::error title=Error::No exit status in ${PWD}/mpi-hello.exit: the job script did not run to its end (killed, walltime exceeded, node failure); the tail of its output follows"
+            tail -n 40 run.*.out 2>/dev/null
+            exit 1
+          fi
+          status=$(cat mpi-hello.exit)
+          if [ "${status}" = "124" ]; then
+            echo "::error title=Error::The MPI launch timed out after 5 minutes: the ranks never finished (a launcher or rank that could not connect, see the output); the tail of the output follows"
+            tail -n 40 run.*.out 2>/dev/null
+            exit 1
+          fi
+          if [ "${status}" != "0" ]; then
+            echo "::error title=Error::The MPI job exited with status ${status}; the tail of its output follows"
+            tail -n 40 run.*.out 2>/dev/null
+            exit 1
+          fi
+          # the layout the job script launched (from its allocation, or the form on the
+          # login node); the form's nodes x ranks per node only when no directive overrode it
+          if [ ! -f mpi-hello.layout ]; then
+            echo "::error title=Error::No rank layout in ${PWD}/mpi-hello.layout: the job script did not reach the launch; the tail of its output follows"
+            tail -n 40 run.*.out 2>/dev/null
+            exit 1
+          fi
+          read -r np_launched nodes_allocated < mpi-hello.layout
+          if ! [[ "${np_launched}" =~ ^[0-9]+$ && "${nodes_allocated}" =~ ^[0-9]+$ ]]; then
+            echo "::error title=Error::Unreadable rank layout '${np_launched} ${nodes_allocated}' in ${PWD}/mpi-hello.layout"
+            exit 1
+          fi
+          if [ "${mpi_scheduler:-false}" = true ] && [ -n "${mpi_nodes:-}" ]; then
+            form_ranks=$(( mpi_nodes * mpi_ntasks_per_node ))
+            form_nodes="${mpi_nodes}"
+          else
+            form_ranks="${mpi_ntasks_per_node}"
+            form_nodes=1
+          fi
+          if [ "${np_launched}" != "${form_ranks}" ] || [ "${nodes_allocated}" != "${form_nodes}" ]; then
+            echo "::warning title=Layout::The job launched ${np_launched} ranks on ${nodes_allocated} node(s) where the form asked for ${form_ranks} on ${form_nodes}: a scheduler directive overrode the layout"
+          fi
+          echo "--- ${PWD}/mpi-hello.out"
+          cat mpi-hello.out 2>/dev/null
+          echo "---"
+          ranks=$(grep -c '^Hello world from processor ' mpi-hello.out 2>/dev/null || true)
+          hosts=$(grep '^Hello world from processor ' mpi-hello.out 2>/dev/null | sed 's/^Hello world from processor \(.*\), rank .*/\1/' | sort -u | wc -l | tr -d ' ')
+          if [ "${ranks:-0}" -ne "${np_launched}" ]; then
+            echo "::error title=Error::${ranks:-0} ranks said hello, ${np_launched} were launched"
+            exit 1
+          fi
+          # one MPI job, not N separate programs: a launcher that cannot hand the ranks
+          # their PMI (srun without the MPI's PMI library) starts N singletons, each
+          # rank 0 of 1 with a correct Allreduce of its own
+          sizes=$(grep '^Hello world from processor ' mpi-hello.out | sed 's/.* out of \([0-9]*\) processors$/\1/' | sort -u | tr '\n' ' ')
+          distinct=$(grep '^Hello world from processor ' mpi-hello.out | sed 's/.*, rank \([0-9]*\) out of .*/\1/' | sort -un | wc -l | tr -d ' ')
+          if [ "${sizes}" != "${np_launched} " ]; then
+            echo "::error title=Error::The ranks reported a world size of ${sizes% } where ${np_launched} were launched: the launcher started separate programs, not one MPI job"
+            exit 1
+          fi
+          if [ "${distinct:-0}" -ne "${np_launched}" ]; then
+            echo "::error title=Error::${distinct:-0} distinct rank numbers among ${np_launched} ranks"
+            exit 1
+          fi
+          if ! grep -q '^Allreduce of the ranks: .*: OK$' mpi-hello.out; then
+            echo "::error title=Error::The Allreduce check did not pass: the ranks did not communicate"
+            exit 1
+          fi
+          if [ "${nodes_allocated}" -gt 1 ] && [ "${hosts}" -lt 2 ]; then
+            echo "::error title=Error::All ${ranks} ranks ran on one node; the job had ${nodes_allocated}"
+            exit 1
+          fi
+          echo "::notice title=MPI hello world::${ranks} ranks on ${hosts} node(s) said hello and the Allreduce check passed"
+          echo "RANKS=${ranks}" | tee -a $OUTPUTS
+          echo "HOSTS=${hosts}" | tee -a $OUTPUTS
+          echo "MPI_OUTPUT=${PWD}/mpi-hello.out" | tee -a $OUTPUTS
+
+'on':
+  execute:
+    inputs:
+      resource:
+        type: compute-clusters
+        label: Compute resource
+        include-workspace: false
+        tooltip: |
+          The cluster whose MPI is tested: the program is compiled on its login node
+          and run on its compute nodes, or on the login node as a quick check.
+      cluster:
+        type: group
+        label: Compute cluster settings
+        items:
+          scheduler:
+            type: boolean
+            default: true
+            label: Submit to the scheduler
+            description: Otherwise the job runs on the login node.
+            hidden: ${{ inputs.resource.schedulerType == '' }}
+            ignore: ${{ .hidden }}
+          nodes:
+            type: number
+            label: Nodes
+            description: With 2 or more the ranks talk across nodes; the check fails when they all land on one.
+            default: 2
+            min: 1
+            max: 64
+            step: 1
+            hidden: ${{ inputs.resource.schedulerType == '' || inputs.cluster.scheduler == false }}
+            ignore: ${{ .hidden }}
+            tooltip: |
+              --nodes (PBS select=N). Every node runs the ranks per node below.
+          ntasks_per_node:
+            type: number
+            label: MPI ranks per node
+            description: On the login node it is the total rank count.
+            default: 2
+            min: 1
+            max: 1024
+            step: 1
+            tooltip: |
+              --ntasks-per-node (PBS ncpus=N:mpiprocs=N). A hello world needs few ranks;
+              set it to the cores per node to exercise a whole node.
+          slurm:
+            type: group
+            label: SLURM directives
+            hidden: ${{ inputs.resource.schedulerType != 'slurm' || inputs.cluster.scheduler == false }}
+            ignore: ${{ inputs.resource.schedulerType != 'slurm' || inputs.cluster.scheduler == false }}
+            items:
+              is_enabled:
+                type: boolean
+                hidden: true
+                default: true
+                label: Is SLURM enabled? Yes, unless the slurm section is hidden and ignored
+              account:
+                label: SLURM account
+                type: slurm-accounts
+                resource: ${{ inputs.resource }}
+                tooltip: '--account=value slurm directive'
+                ignore: ${{ 'existing' != inputs.resource.provider }}
+                hidden: ${{ .ignore }}
+              partition:
+                type: slurm-partitions
+                label: SLURM partition
+                optional: true
+                resource: ${{ inputs.resource }}
+              qos:
+                label: Quality of service (QoS)
+                type: slurm-qos
+                resource: ${{ inputs.resource }}
+                tooltip: '--qos=value slurm directive'
+                ignore: ${{ 'existing' != inputs.resource.provider }}
+                hidden: ${{ .ignore }}
+              node_type:
+                label: Node type
+                type: dropdown
+                optional: true
+                default: ''
+                option-key: ${{ inputs.resource.ip }}
+                tooltip: '--constraint=<value> slurm directive'
+                ignore: ${{ 'existing' != inputs.resource.provider || (inputs.resource.ip != 'blueback.navydsrc.hpc.mil' && inputs.resource.ip != 'narwhal.navydsrc.hpc.mil' && inputs.resource.ip != 'nautilus.navydsrc.hpc.mil' && inputs.resource.ip != 'raider.afrl.hpc.mil' && inputs.resource.ip != 'crux.mhpcc.hpc.mil') }}
+                hidden: ${{ .ignore }}
+                options:
+                  blueback.navydsrc.hpc.mil:
+                    - standard
+                    - bigmem
+                    - mla
+                    - viz
+                    - transfer
+                  narwhal.navydsrc.hpc.mil:
+                    - standard
+                    - bigmem
+                    - mla
+                    - smla
+                    - dmla
+                    - viz
+                    - transfer
+                  nautilus.navydsrc.hpc.mil:
+                    - standard
+                    - highclock
+                    - bigmem
+                    - mla
+                    - viz
+                    - transfer
+                  raider.afrl.hpc.mil:
+                    - standard
+                    - highclock
+                    - bigmem
+                    - mla
+                    - viz
+                    - transfer
+                  crux.mhpcc.hpc.mil:
+                    - AMD
+                    - Intel
+              time:
+                label: Walltime
+                description: HH:MM:SS, or D-HH:MM:SS for runs over a day.
+                type: string
+                default: '00:10:00'
+                tooltip: '--time= SLURM directive to set the maximum wall-clock time limit for the job'
+              scheduler_directives:
+                type: editor
+                label: Scheduler directives
+                optional: true
+                default: |
+                  ##SBATCH --constraint=mla # uncomment for Navy and AFRL DSRC systems
+                tooltip: |
+                  Add extra SLURM directives, one per line, using the #SBATCH prefix. For example:
+                  #SBATCH --exclusive
+                  #SBATCH --constraint=<feature>
+                  The workflow already sets --nodes and --ntasks-per-node from the fields above;
+                  a directive here repeating one of them takes precedence.
+          pbs:
+            type: group
+            label: PBS directives
+            hidden: ${{ inputs.resource.schedulerType != 'pbs' || inputs.cluster.scheduler == false }}
+            ignore: ${{ inputs.resource.schedulerType != 'pbs' || inputs.cluster.scheduler == false }}
+            items:
+              is_enabled:
+                type: boolean
+                hidden: true
+                default: true
+                label: Is PBS enabled? Yes, unless the pbs section is hidden and ignored
+              account:
+                label: Account
+                type: string
+                tooltip: PBS account for job submission (-A)
+              scheduler_directives:
+                label: Scheduler directives
+                type: editor
+                optional: true
+                tooltip: |
+                  Add extra PBS directives, one per line, using the #PBS prefix. The workflow
+                  already sets -l select=N:ncpus=M:mpiprocs=M from the fields above; a select
+                  line uncommented here (the per-site node shapes) takes precedence over it.
+                default: |
+                  # Parameters that apply to all sites
+                  #PBS -l walltime=00:10:00
+                  #PBS -V
+                  #PBS -q standard
+                  # Remove first # to activate specific lines
+                  #=====Ruth (Lustre, only vis has NVIDIA)=====
+                  ##PBS -l select=1:ncpus=128:mpiprocs=128
+                  #=====Warhawk (Lustre)====
+                  ##PBS -l select=1:ncpus=128:mpiprocs=128
+                  #=====Wheat (WEKA, nmlas=4|6)====
+                  ##PBS -l select=1:ncpus=92:mpiprocs=92:nmlas=4
+                  #=====Carpenter=====
+                  ##PBS -l select=1:ncpus=192:mpiprocs=192:nmlas=4
+      mpi:
+        type: group
+        label: MPI
+        items:
+          load:
+            type: editor
+            label: MPI environment commands
+            optional: true
+            description: Leave empty to use the MPI on PATH or the first known module; otherwise the commands that put mpicc and the launcher on PATH, one per line.
+            tooltip: |
+              Run on the login node to compile and inside the job. Empty: the mpicc and launcher
+              already on PATH, else the first of mpi/latest (FRAN, Intel MPI), mpich/gnu (Nautilus),
+              mpi/mpich-x86_64 and mpi/openmpi-x86_64 (the cloud clusters), openmpi and mpich that
+              loads. Otherwise, for example, module load mpich/intel/3.3.2 or
+              source /opt/intel/oneapi/setvars.sh. A workflow step is not a login shell, so module
+              is initialized before these commands run; commands that do not deliver mpicc and
+              the launcher fail the run before anything is queued.
+          launcher:
+            type: string
+            label: MPI launcher
+            description: The command up to its process-count option; the rank count and the program are appended.
+            default: mpirun -np
+            tooltip: |
+              mpirun -np launches with the MPI's own launcher (MPICH's Hydra and Open MPI both
+              read the SLURM or PBS allocation); srun --mpi=pmi2 -n, or srun -n, launches with
+              SLURM's and needs the scheduler on: outside an allocation srun has nothing to
+              run on. The job runs <launcher> <ranks> mpi_hello, bounded by a 5-minute timeout.

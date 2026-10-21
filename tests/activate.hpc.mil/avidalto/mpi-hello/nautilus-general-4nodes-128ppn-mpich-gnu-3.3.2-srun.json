@@ -1,0 +1,37 @@
+{
+  "name": "nautilus-general-4nodes-128ppn-mpich-gnu-3.3.2-srun",
+  "platform": "activate.hpc.mil",
+  "user": "avidalto",
+  "workflow_name": "mpi-hello",
+  "workflow": {
+    "repo": "github.com/parallelworks/probe-tests-activate-parallel-works",
+    "path": "workflows/activate.hpc.mil/mpi-hello/yamls/hsp.yaml",
+    "ref": "hsp"
+  },
+  "timeout_s": 3600,
+  "leftover_patterns": [
+    "mpi_hello",
+    "mpirun"
+  ],
+  "inputs": {
+    "resource": "pw://avidalto/nautilus",
+    "cluster": {
+      "scheduler": true,
+      "nodes": 4,
+      "ntasks_per_node": 128,
+      "slurm": {
+        "is_enabled": true,
+        "account": "hpcmo49636prw",
+        "partition": "general",
+        "qos": "standard",
+        "node_type": "standard",
+        "time": "",
+        "scheduler_directives": "##SBATCH --constraint=mla # uncomment for Navy and AFRL DSRC systems\n"
+      }
+    },
+    "mpi": {
+      "load": "module load mpich/gnu/3.3.2",
+      "launcher": "srun --mpi=pmi2 -n"
+    }
+  }
+}
