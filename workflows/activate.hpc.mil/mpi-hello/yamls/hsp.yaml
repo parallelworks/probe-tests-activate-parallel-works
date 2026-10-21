@@ -51,8 +51,10 @@ jobs:
           fi
           cat inputs.sh
           echo "JOB_DIR=${PWD}" | tee -a $OUTPUTS
-      # one file the compile step and the job script source; a workflow step is not
-      # a login shell, so module is initialized before the form's commands run
+      # one file the compile step and the job script source: module initialized for a
+      # non-login shell, then the form's commands, or the first known MPI when none were
+      # given. Checked in a fresh shell, so a missing MPI fails the run before anything
+      # is queued
       - name: Prepare the MPI Environment
         run: |
           set -e
@@ -60,9 +62,9 @@ jobs:
           cat > mpi-load.txt <<'PW_LOAD_EOF'
           ${{ inputs.mpi.load }}
           PW_LOAD_EOF
-          {
-            cat <<'EOF'
-          # MPI environment: module initialized for a non-login shell, then the commands from the form
+          sed -i '/^[[:space:]]*undefined[[:space:]]*$/d' mpi-load.txt
+          cat <<'EOF' > mpi-env.sh
+          # MPI environment: module initialized for a non-login shell, then what provides MPI
           if ! command -v module > /dev/null 2>&1; then
               for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /etc/profile.d/z00_lmod.sh \
                        "${MODULESHOME:-/nonexistent}/init/bash" "${LMOD_PKG:-/nonexistent}/init/bash" \
@@ -74,18 +76,42 @@ jobs:
               done
           fi
           EOF
-            sed '/^[[:space:]]*undefined[[:space:]]*$/d' mpi-load.txt
-          } > mpi-env.sh
-          # sourced in a fresh shell: commands that do not deliver mpicc and the
-          # launcher fail the run here, before anything is queued
           launcher_cmd="${mpi_launcher%% *}"
-          if ! out=$(bash -c "source '${PWD}/mpi-env.sh' && command -v mpicc && command -v '${launcher_cmd}'" 2>&1); then
-            echo "::error title=Error::Sourcing mpi-env.sh does not provide mpicc and ${launcher_cmd}; the MPI environment commands and the output follow"
-            cat mpi-load.txt
-            echo "${out}"
-            exit 1
+          # does a fresh shell that sources mpi-env.sh and runs the snippet have mpicc and the launcher?
+          f_provides() {
+            bash -c "source '${PWD}/mpi-env.sh' && ${1} && command -v mpicc && command -v '${launcher_cmd}'" 2>&1
+          }
+          if [ -n "$(tr -d '[:space:]' < mpi-load.txt)" ]; then
+            cat mpi-load.txt >> mpi-env.sh
+            if ! out=$(f_provides true); then
+              echo "::error title=Error::Sourcing mpi-env.sh does not provide mpicc and ${launcher_cmd}; the MPI environment commands and the output follow"
+              cat mpi-load.txt
+              echo "${out}"
+              exit 1
+            fi
+            echo "::notice::MPI: the environment commands from the form provide $(echo "${out}" | tr '\n' ' ')"
+          else
+            # the MPI already on PATH, else the first known module that provides one
+            found=""
+            if out=$(f_provides true); then
+              found="the mpicc and ${launcher_cmd} already on PATH"
+            else
+              for mod in mpi/latest mpich/gnu mpi/mpich-x86_64 mpi/openmpi-x86_64 openmpi mpich; do
+                if out=$(f_provides "module load ${mod} > /dev/null 2>&1"); then
+                  echo "module load ${mod}" >> mpi-env.sh
+                  found="the module ${mod}"
+                  break
+                fi
+              done
+            fi
+            if [ -z "${found}" ]; then
+              echo "::error title=Error::No MPI found: nothing on PATH provides mpicc and ${launcher_cmd}, and none of the known modules (mpi/latest, mpich/gnu, mpi/mpich-x86_64, mpi/openmpi-x86_64, openmpi, mpich) loads; give the environment commands in the form"
+              exit 1
+            fi
+            echo "::notice::MPI: using ${found}: $(echo "${out}" | tr '\n' ' ')"
           fi
-          echo "::notice::MPI environment ready: $(echo "${out}" | tr '\n' ' ')"
+          echo "--- mpi-env.sh"
+          cat mpi-env.sh
       - name: Compile the MPI Hello World
         run: |
           set -eo pipefail
@@ -459,14 +485,16 @@ jobs:
           load:
             type: editor
             label: MPI environment commands
-            description: Put mpicc and the launcher on PATH, one command per line; run on the login node to compile and in the job.
-            default: |
-              module load mpich/gnu/3.3.2
+            optional: true
+            description: Leave empty to use the MPI on PATH or the first known module; otherwise the commands that put mpicc and the launcher on PATH, one per line.
             tooltip: |
-              For example module load mpich/gnu/3.3.2 (Nautilus), module load mpi/openmpi-x86_64
-              (the cloud clusters) or source /opt/intel/oneapi/setvars.sh. A workflow step is not
-              a login shell, so module is initialized before these commands run. Commands that
-              do not deliver mpicc and the launcher fail the run before anything is queued.
+              Run on the login node to compile and inside the job. Empty: the mpicc and launcher
+              already on PATH, else the first of mpi/latest (FRAN, Intel MPI), mpich/gnu (Nautilus),
+              mpi/mpich-x86_64 and mpi/openmpi-x86_64 (the cloud clusters), openmpi and mpich that
+              loads. Otherwise, for example, module load mpich/intel/3.3.2 or
+              source /opt/intel/oneapi/setvars.sh. A workflow step is not a login shell, so module
+              is initialized before these commands run; commands that do not deliver mpicc and
+              the launcher fail the run before anything is queued.
           launcher:
             type: string
             label: MPI launcher

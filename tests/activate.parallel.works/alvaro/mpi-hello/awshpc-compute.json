@@ -1,0 +1,31 @@
+{
+  "name": "awshpc-compute",
+  "platform": "activate.parallel.works",
+  "user": "alvaro",
+  "workflow_name": "mpi-hello",
+  "workflow": {
+    "repo": "github.com/parallelworks/probe-tests-activate-parallel-works",
+    "path": "workflows/activate.hpc.mil/mpi-hello/yamls/hsp.yaml",
+    "ref": "hsp"
+  },
+  "timeout_s": 3600,
+  "leftover_patterns": ["mpi_hello", "mpirun"],
+  "inputs": {
+    "resource": "pw://alvaro/awshpc",
+    "cluster": {
+      "scheduler": true,
+      "nodes": 2,
+      "ntasks_per_node": 2,
+      "slurm": {
+        "is_enabled": true,
+        "partition": "compute",
+        "time": "00:15:00",
+        "scheduler_directives": "##SBATCH --constraint=mla # uncomment for Navy and AFRL DSRC systems\n"
+      }
+    },
+    "mpi": {
+      "load": "module load mpi/mpich-x86_64\n",
+      "launcher": "mpirun -np"
+    }
+  }
+}

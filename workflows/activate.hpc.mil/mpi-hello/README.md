@@ -52,8 +52,28 @@ repository. Only the script submitter is fetched from GitHub (`canary`).
 | Nodes, MPI ranks per node | The job's shape. With 2 or more nodes the check also requires the ranks to have run on 2 or more hosts. |
 | SLURM directives | Account, partition, QoS, node type (`--constraint`), walltime, extra `#SBATCH` lines. Account, QoS and node type apply to on-prem (`existing`) resources. |
 | PBS directives | Account and extra `#PBS` lines for the PBS systems. |
-| MPI environment commands | What puts `mpicc` and the launcher on PATH, for example `module load mpich/gnu/3.3.2` on Nautilus. Run on the login node to compile and inside the job. |
+| MPI environment commands | Empty takes the MPI on PATH, else the first known module that loads (`mpi/latest`, `mpich/gnu`, `mpi/mpich-x86_64`, `mpi/openmpi-x86_64`, `openmpi`, `mpich`); otherwise the commands that put `mpicc` and the launcher on PATH. Run on the login node to compile and inside the job. |
 | MPI launcher | The command up to its process-count option: `mpirun -np` (default), `srun --mpi=pmi2 -n`, `srun -n`. The job runs `<launcher> <ranks> mpi_hello`. |
+
+## Other systems
+
+Nothing in the workflow is specific to Nautilus but the defaults of its tests: the
+MPI comes from the environment commands, or from the known modules when they are
+left empty, and the launcher from its input.
+
+| System | MPI | Environment commands |
+|---|---|---|
+| Nautilus (Navy DSRC) | MPICH 3.3.2, `mpich/gnu/3.3.2` (also `mpich/intel`, `mpich/aocc`) | `module load mpich/gnu/3.3.2`, or empty (`mpich/gnu` is a known module) |
+| FRAN | Intel MPI 2021.14, `mpi/2021.14` and `mpi/latest` | `module load mpi/latest`, or empty |
+| awshpc, gcpsmall (cloud clusters of activate.parallel.works) | MPICH 4.1.1 as `mpi/mpich-x86_64`, Open MPI as `mpi/openmpi-x86_64` | `module load mpi/mpich-x86_64`, or empty |
+
+MPICH's and Intel MPI's `mpirun` (Hydra) and Open MPI's all read the SLURM or PBS
+allocation, so `mpirun -np` is the default launcher everywhere; `srun --mpi=pmi2 -n`
+is the alternative where a site's MPI is built for it. On a cloud cluster the hsp
+submitter writes no account, QoS, CPUs-per-task, node-count or constraint header
+(those are for on-prem `existing` resources) and the job's shape comes from the
+`--nodes` and `--ntasks-per-node` directives the workflow composes, so the same YAML
+runs there, which is how it is tested from activate.parallel.works.
 
 ## Check Nautilus by hand first
 
@@ -130,6 +150,19 @@ launch). The same inputs, as PROBE definitions, are
 `tests/activate.hpc.mil/avidalto/mpi-hello/nautilus-compute.json` and
 `nautilus-login.json` at the root of this repository; they point `workflow.repo` at
 this repository and `workflow.ref` at the `hsp` branch.
+
+`tests/hsp/awshpc-login.json` (the environment commands left empty, so the known
+module `mpi/mpich-x86_64` is found) and `tests/hsp/awshpc-compute.json` (two cloud
+nodes, `module load mpi/mpich-x86_64`) run the same workflow on `pw://alvaro/awshpc`
+of activate.parallel.works; their PROBE definitions are under
+`tests/activate.parallel.works/alvaro/mpi-hello/`. They are how the workflow is tested
+end to end before a run on HSP, from a `parallelworks/workflows` checkout:
+
+```bash
+cd workflows/probe/app
+python3 -m probe run --tests /path/to/probe-tests-activate-parallel-works/tests --results results \
+    --test activate.parallel.works/alvaro/mpi-hello/awshpc-login.json
+```
 
 The account in them (`hpcmo49636prw`) is the one the `rag-vllm` Nautilus test of
 the workflows repository used in September 2026; `scripts/nautilus-check.sh` prints
