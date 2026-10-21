@@ -39,9 +39,12 @@ a system's credentials.
 3. **Check the Results** (same job): fails the run when the exit file is missing
    (the script never ran to its end: killed, walltime, node failure), says `124`
    (the launch timed out) or is otherwise non-zero; when fewer ranks than the layout
-   launched said hello; when the Allreduce line is not `OK`; or when a multi-node job
-   put every rank on one node. Warns when a scheduler directive changed the layout
-   from the form's nodes x ranks per node. Publishes `RANKS`, `HOSTS` and `MPI_OUTPUT`.
+   launched said hello; when the ranks did not all report that many processors with
+   distinct rank numbers (a launcher that cannot hand the ranks their PMI starts N
+   single-rank programs, each with a correct Allreduce of its own); when the
+   Allreduce line is not `OK`; or when a multi-node job put every rank on one node.
+   Warns when a scheduler directive changed the layout from the form's nodes x ranks
+   per node. Publishes `RANKS`, `HOSTS` and `MPI_OUTPUT`.
 
 ## Inputs
 
@@ -151,8 +154,14 @@ with, and a working alternative is a second test, not a change to the first.
   node at the address its hostname resolves to (the `Nodes :` lines of the output
   show that address and the interfaces each node has). Alternatives: launch with
   SLURM, `srun --mpi=pmi2 -n` (SLURM starts the ranks and serves PMI, no Hydra
-  sockets; the `PMI :` line lists the plugins `srun` offers), or point Hydra at the
-  interface the nodes reach each other on, `mpirun -iface <interface> -np`.
+  sockets; the `PMI :` line lists the plugins `srun` offers), which passed on
+  Nautilus the same day, or point Hydra at the interface the nodes reach each other
+  on, `mpirun -iface <interface> -np`.
+- **`The ranks reported a world size of 1 where N were launched`** with an `srun`
+  launcher: the ranks started but found no PMI, so each ran alone. Intel MPI under
+  `srun` needs SLURM's PMI library named in the environment commands, for example
+  `export I_MPI_PMI_LIBRARY=/usr/lib64/libpmi2.so` after the `module load`; MPICH
+  needs `--mpi=pmi2` on a SLURM whose default PMI is `none`.
 
 ## Tests
 

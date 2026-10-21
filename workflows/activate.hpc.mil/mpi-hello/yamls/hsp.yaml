@@ -315,6 +315,19 @@ jobs:
             echo "::error title=Error::${ranks:-0} ranks said hello, ${np_launched} were launched"
             exit 1
           fi
+          # one MPI job, not N separate programs: a launcher that cannot hand the ranks
+          # their PMI (srun without the MPI's PMI library) starts N singletons, each
+          # rank 0 of 1 with a correct Allreduce of its own
+          sizes=$(grep '^Hello world from processor ' mpi-hello.out | sed 's/.* out of \([0-9]*\) processors$/\1/' | sort -u | tr '\n' ' ')
+          distinct=$(grep '^Hello world from processor ' mpi-hello.out | sed 's/.*, rank \([0-9]*\) out of .*/\1/' | sort -un | wc -l | tr -d ' ')
+          if [ "${sizes}" != "${np_launched} " ]; then
+            echo "::error title=Error::The ranks reported a world size of ${sizes% } where ${np_launched} were launched: the launcher started separate programs, not one MPI job"
+            exit 1
+          fi
+          if [ "${distinct:-0}" -ne "${np_launched}" ]; then
+            echo "::error title=Error::${distinct:-0} distinct rank numbers among ${np_launched} ranks"
+            exit 1
+          fi
           if ! grep -q '^Allreduce of the ranks: .*: OK$' mpi-hello.out; then
             echo "::error title=Error::The Allreduce check did not pass: the ranks did not communicate"
             exit 1
