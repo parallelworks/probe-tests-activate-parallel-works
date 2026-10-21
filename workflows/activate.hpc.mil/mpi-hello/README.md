@@ -67,7 +67,7 @@ launcher from its input.
 | System | MPI | Environment commands |
 |---|---|---|
 | Nautilus (Navy DSRC) | MPICH 3.3.2 as `mpich/gnu/3.3.2`, `mpich/intel/3.3.2`, `mpich/aocc/3.3.2` | `module load mpich/intel/3.3.2`, or empty (`mpich/gnu` is a known module) |
-| FRAN | Intel MPI 2021.14 as `mpi/2021.14` and `mpi/latest` | `module load mpi/latest`, or empty |
+| FRAN (ARL DSRC, TI-24) | Intel MPI 2021.14 as `mpi/2021.14` and `mpi/latest`, under `/p/app/modulefiles` | `module load mpi/latest`, or empty. The partition must be named: `standard` (792 nodes of 192 cores), `large-mem`, `vis` (L40S), `ai-ml` (H200); the node-type field does not apply there |
 | awshpc (AWS cluster of activate.parallel.works) | Amazon Open MPI on PATH (`/opt/amazon/openmpi`); MPICH 4.1.1 as `mpi/mpich-x86_64` | empty (takes the Open MPI on PATH), or `module load mpi/mpich-x86_64` |
 | gcpsmall (Google cluster of activate.parallel.works) | Open MPI 4.1 as `mpi/openmpi-x86_64`, MPICH as `mpi/mpich-x86_64` | `module load mpi/openmpi-x86_64`, or empty |
 
