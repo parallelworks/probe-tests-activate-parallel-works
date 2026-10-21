@@ -155,6 +155,14 @@ jobs:
         run: |
           set -e
           rm -f mpi-hello.exit mpi-hello.out mpi-hello.layout
+          # run on every node of a SLURM job before the launch: the address a node's
+          # hostname resolves to is the one MPI launchers connect through
+          cat <<'EOF' > node-info.sh
+          #!/bin/bash
+          addr=$(getent hosts "$(hostname)" 2> /dev/null | awk '{print $1; exit}')
+          ifaces=$(ip -o -4 addr show 2> /dev/null | awk '{printf "%s=%s ", $2, $4}')
+          echo "  $(hostname): resolves to ${addr:-?}; interfaces ${ifaces:-unknown}"
+          EOF
           {
             cat inputs.sh
             cat <<'EOF'
@@ -186,12 +194,19 @@ jobs:
           read -r -a launcher <<< "${mpi_launcher}"
           # bounded: ranks that cannot reach each other hang in the Allreduce, and on
           # the login node no walltime would end them
-          cmd=(timeout -k 30 600 "${launcher[@]}" "${np}" "${job_dir}/mpi_hello")
+          cmd=(timeout -k 30 300 "${launcher[@]}" "${np}" "${job_dir}/mpi_hello")
           mpi_version="$( (mpichversion 2> /dev/null || mpirun --version 2> /dev/null) | head -n 1 )" || true
 
           echo "Host     : $(hostname)${SLURM_JOB_NODELIST:+, SLURM job ${SLURM_JOB_ID} on ${SLURM_JOB_NODELIST}}${PBS_JOBID:+, PBS job ${PBS_JOBID}}"
           echo "MPI      : $(command -v mpicc)${mpi_version:+ (${mpi_version})}"
           echo "Ranks    : ${np} on ${nodes} node(s)"
+          if [ -n "${SLURM_JOB_ID:-}" ]; then
+              # what a launcher choice depends on: SLURM's PMI plugins for srun --mpi=...,
+              # the nodes' addresses for mpirun's proxies (and its -iface option)
+              echo "PMI      : $(srun --mpi=list 2>&1 | tr '\n' ' ')"
+              echo "Nodes    :"
+              srun -N "${nodes}" --ntasks-per-node=1 bash "${job_dir}/node-info.sh" 2>&1 || true
+          fi
           echo "Command  : ${cmd[*]}"
           echo "Started  : $(date)"
           echo
@@ -259,6 +274,11 @@ jobs:
             exit 1
           fi
           status=$(cat mpi-hello.exit)
+          if [ "${status}" = "124" ]; then
+            echo "::error title=Error::The MPI launch timed out after 5 minutes: the ranks never finished (a launcher or rank that could not connect, see the output); the tail of the output follows"
+            tail -n 40 run.*.out 2>/dev/null
+            exit 1
+          fi
           if [ "${status}" != "0" ]; then
             echo "::error title=Error::The MPI job exited with status ${status}; the tail of its output follows"
             tail -n 40 run.*.out 2>/dev/null
@@ -504,4 +524,4 @@ jobs:
               mpirun -np launches with the MPI's own launcher (MPICH's Hydra and Open MPI both
               read the SLURM or PBS allocation); srun --mpi=pmi2 -n, or srun -n, launches with
               SLURM's and needs the scheduler on: outside an allocation srun has nothing to
-              run on. The job runs <launcher> <ranks> mpi_hello, bounded by a 10-minute timeout.
+              run on. The job runs <launcher> <ranks> mpi_hello, bounded by a 5-minute timeout.

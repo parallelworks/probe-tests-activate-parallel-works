@@ -28,7 +28,7 @@
     },
     "mpi": {
       "load": "module load mpich/intel/3.3.2",
-      "launcher": "srun --mpi=pmi2 -n"
+      "launcher": "mpirun -np"
     }
   }
 }
