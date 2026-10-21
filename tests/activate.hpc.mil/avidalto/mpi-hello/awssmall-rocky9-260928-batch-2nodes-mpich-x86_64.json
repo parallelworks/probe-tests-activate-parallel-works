@@ -1,5 +1,5 @@
 {
-  "name": "awssmall-rocky9-260928-compute-2nodes-mpich-x86_64",
+  "name": "awssmall-rocky9-260928-batch-2nodes-mpich-x86_64",
   "platform": "activate.hpc.mil",
   "user": "avidalto",
   "workflow_name": "mpi-hello",
@@ -21,7 +21,7 @@
       "ntasks_per_node": 2,
       "slurm": {
         "is_enabled": true,
-        "partition": "compute",
+        "partition": "batch",
         "time": "00:15:00",
         "scheduler_directives": ""
       }
