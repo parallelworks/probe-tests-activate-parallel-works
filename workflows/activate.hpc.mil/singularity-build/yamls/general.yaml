@@ -1,0 +1,398 @@
+# yaml-language-server: $schema=https://activate.parallel.works/workflow.schema.json
+# Builds a Singularity (Apptainer or SingularityCE) image from a definition file
+# on the login node of a cluster, the way an HPC user builds the container for
+# a job: the form's definition is written to the job directory, the runtime is
+# located (the environment commands from the form, else apptainer or singularity
+# on PATH, else a module), the image is built into the chosen directory with the
+# OCI layer cache and build scratch beside it, and a command is run inside the
+# built image to prove it mounts and runs on this node. The run completes with
+# the image's path and fails loud at the first missing piece: no runtime, a
+# definition that does not build, an image that does not run. Login node only,
+# no scheduler job, no endpoint, nothing left behind but the image and the cache.
+#
+# Self-contained on purpose: every script is written by the steps from this
+# file, so a run checks nothing out and fetches nothing from GitHub.
+permissions:
+  - '*'
+
+jobs:
+  build:
+    ssh:
+      remoteHost: ${{ inputs.resource.ip }}
+    steps:
+      - name: Create Inputs
+        run: |
+          set -e
+          env | grep '^PW_' | grep -v 'PW_API_KEY' > inputs.sh
+          sed -i 's/=\(.*\)/="\1"/' inputs.sh
+          cat <<'EOF' >> inputs.sh
+          image_name="${{ inputs.container.image_name }}"
+          output_dir="${{ inputs.container.output_dir }}"
+          build_fakeroot="${{ inputs.build.fakeroot }}"
+          build_cache_dir="${{ inputs.build.cache_dir }}"
+          build_timeout_min="${{ inputs.build.timeout_min }}"
+          EOF
+          # a hidden or empty input renders as nothing or undefined: drop those lines
+          sed -i '/=\s*$\|=undefined\s*$\|=""\s*$\|="undefined"\s*$/d' inputs.sh
+          sed -i 's/^/export /' inputs.sh
+          source inputs.sh
+          # values that may hold quotes are written as files, not shell assignments
+          cat > test-command.txt <<'PW_TEST_EOF'
+          ${{ inputs.container.test_command }}
+          PW_TEST_EOF
+          cat > build-options.txt <<'PW_OPTS_EOF'
+          ${{ inputs.build.options }}
+          PW_OPTS_EOF
+          sed -i '/^[[:space:]]*undefined[[:space:]]*$/d' test-command.txt build-options.txt
+          # a CLI run leaves an omitted input empty: the form's defaults, applied here too
+          image_name="${image_name:-container.sif}"
+          output_dir="${output_dir:-${HOME}/pw/software/containers}"
+          build_timeout_min="${build_timeout_min:-60}"
+          case "${output_dir}" in '~') output_dir="${HOME}" ;; '~/'*) output_dir="${HOME}/${output_dir#\~/}" ;; esac
+          case "${build_cache_dir}" in '~') build_cache_dir="${HOME}" ;; '~/'*) build_cache_dir="${HOME}/${build_cache_dir#\~/}" ;; esac
+          cache_dir="${build_cache_dir:-${output_dir}/.cache}"
+          if ! [[ "${image_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::The image file name must be letters, digits, dots, dashes and underscores, got '${image_name}'"
+            exit 1
+          fi
+          case "${image_name}" in *.sif) ;; *) image_name="${image_name}.sif" ;; esac
+          if ! [[ "${build_timeout_min}" =~ ^[0-9]+$ ]] || [ "${build_timeout_min}" -lt 1 ]; then
+            echo "::error::The build time limit must be a positive number of minutes, got '${build_timeout_min}'"
+            exit 1
+          fi
+          case "${output_dir}" in /*) ;; *) echo "::error::The image directory must be an absolute path, got '${output_dir}'"; exit 1 ;; esac
+          case "${cache_dir}" in /*) ;; *) echo "::error::The cache directory must be an absolute path, got '${cache_dir}'"; exit 1 ;; esac
+          # the resolved values replace the raw form lines
+          sed -i '/^export \(image_name\|output_dir\|build_fakeroot\|build_cache_dir\|build_timeout_min\)=/d' inputs.sh
+          {
+            echo "export image_name=\"${image_name}\""
+            echo "export output_dir=\"${output_dir}\""
+            echo "export cache_dir=\"${cache_dir}\""
+            echo "export image=\"${output_dir}/${image_name}\""
+            echo "export build_timeout_min=\"${build_timeout_min}\""
+            echo "export build_fakeroot=\"${build_fakeroot:-false}\""
+          } >> inputs.sh
+          cat inputs.sh
+          echo "--- test command: $(cat test-command.txt)"
+          echo "--- build options: $(cat build-options.txt)"
+          echo "JOB_DIR=${PWD}" | tee -a $OUTPUTS
+      # one file every later step sources: module initialized for a non-login shell,
+      # then the form's commands, or the first known module when none were given and
+      # no runtime is on PATH. Checked in a fresh shell, so a missing runtime fails
+      # the run before any download
+      - name: Prepare the Container Runtime
+        run: |
+          set -e
+          source inputs.sh
+          cat > runtime-env.txt <<'PW_ENV_EOF'
+          ${{ inputs.build.environment }}
+          PW_ENV_EOF
+          sed -i '/^[[:space:]]*undefined[[:space:]]*$/d' runtime-env.txt
+          cat <<'EOF' > runtime-env.sh
+          # Container runtime environment: module initialized for a non-login shell, then what provides apptainer or singularity
+          if ! command -v module > /dev/null 2>&1; then
+              for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /etc/profile.d/z00_lmod.sh \
+                       "${MODULESHOME:-/nonexistent}/init/bash" "${LMOD_PKG:-/nonexistent}/init/bash" \
+                       /usr/share/lmod/lmod/init/bash /usr/share/Modules/init/bash; do
+                  if [ -r "${f}" ]; then
+                      source "${f}"
+                      break
+                  fi
+              done
+          fi
+          # the HPCMP site module directories: a login shell has them on MODULEPATH, a
+          # workflow step may not
+          if command -v module > /dev/null 2>&1; then
+              for d in /p/app/modulefiles /p/app/site/modulefiles; do
+                  if [ -d "${d}" ]; then
+                      case ":${MODULEPATH:-}:" in
+                          *":${d}:"*) ;;
+                          *) module use "${d}" > /dev/null 2>&1 || true ;;
+                      esac
+                  fi
+              done
+          fi
+          EOF
+          # does a fresh shell that sources runtime-env.sh and runs the snippet have a runtime? Prints its path
+          f_provides() {
+            bash -c "source '${PWD}/runtime-env.sh' && ${1} && { command -v apptainer || command -v singularity; }" 2>&1
+          }
+          if [ -n "$(tr -d '[:space:]' < runtime-env.txt)" ]; then
+            cat runtime-env.txt >> runtime-env.sh
+            if ! out=$(f_provides true); then
+              echo "::error title=Error::Sourcing runtime-env.sh does not provide apptainer or singularity; the environment commands and the output follow"
+              cat runtime-env.txt
+              echo "${out}"
+              exit 1
+            fi
+            found="the environment commands from the form"
+          else
+            found=""
+            if out=$(f_provides true); then
+              found="the runtime already on PATH"
+            else
+              for mod in apptainer singularity singularity-ce; do
+                if out=$(f_provides "module load ${mod} > /dev/null 2>&1"); then
+                  echo "module load ${mod}" >> runtime-env.sh
+                  found="the module ${mod}"
+                  break
+                fi
+              done
+            fi
+            if [ -z "${found}" ]; then
+              echo "::error title=Error::No container runtime found: nothing on PATH provides apptainer or singularity, and none of the modules apptainer, singularity and singularity-ce loads; give the environment commands in the form (for example module load singularity)"
+              exit 1
+            fi
+          fi
+          runtime_cmd=$(echo "${out}" | tail -n 1)
+          source runtime-env.sh
+          runtime_version=$("${runtime_cmd}" --version 2>&1 | head -n 1)
+          {
+            echo "export runtime_cmd=\"${runtime_cmd}\""
+            echo "export runtime_name=\"$(basename "${runtime_cmd}")\""
+            echo "export runtime_version=\"${runtime_version}\""
+          } >> inputs.sh
+          echo "::notice title=Container runtime::${runtime_version} at ${runtime_cmd}, from ${found}"
+          echo "--- runtime-env.sh"
+          cat runtime-env.sh
+          # what an unprivileged build depends on, for the log of a failing system
+          echo "--- build capabilities on $(hostname)"
+          echo "Runtime        : ${runtime_version} (${runtime_cmd})"
+          echo "subuid range   : $(grep -E "^$(id -un):" /etc/subuid 2> /dev/null || echo "none: no --fakeroot uid mapping for $(id -un)")"
+          echo "user namespaces: $(cat /proc/sys/user/max_user_namespaces 2> /dev/null || echo unknown) allowed"
+          echo "setuid starter : $(grep -h -E '^allow setuid' /etc/apptainer/apptainer.conf /etc/singularity/singularity.conf 2> /dev/null | head -n 1 || echo unknown)"
+          echo "proxy          : https_proxy=${https_proxy:-${HTTPS_PROXY:-unset}} no_proxy=${no_proxy:-${NO_PROXY:-unset}}"
+          echo "HOME           : ${HOME}, WORKDIR: ${WORKDIR:-unset}, TMPDIR: ${TMPDIR:-unset}"
+          echo "image dir      : ${output_dir} ($(df -h "${output_dir}" 2> /dev/null | awk 'NR == 2 {print $4 " free on " $1}' || df -h "$(dirname "${output_dir}")" 2> /dev/null | awk 'NR == 2 {print $4 " free on " $1 " (parent)"}'))"
+          echo "cache dir      : ${cache_dir}"
+      - name: Write the Definition File
+        run: |
+          set -e
+          source inputs.sh
+          cat > container.def <<'PW_DEF_EOF'
+          ${{ inputs.container.definition }}
+          PW_DEF_EOF
+          if [ -z "$(tr -d '[:space:]' < container.def)" ] || [ "$(tr -d '[:space:]' < container.def)" = undefined ]; then
+            echo "::error title=Error::The definition file is empty: paste one in the form (it starts with a Bootstrap: line)"
+            exit 1
+          fi
+          if ! grep -q -i -E '^[[:space:]]*Bootstrap:' container.def; then
+            echo "::error title=Error::The definition file has no Bootstrap: line (for example Bootstrap: docker, then From: python:3.12-slim); the file follows"
+            cat container.def
+            exit 1
+          fi
+          echo "--- ${PWD}/container.def"
+          cat container.def
+      # the image is built under a temporary name in its own directory and renamed
+      # once complete, so a failed or cancelled build never leaves a half-written
+      # file under the final name; the runtime's layer cache and build scratch go
+      # under cache_dir, not /tmp, which login nodes keep small
+      - name: Build the Image
+        run: |
+          set -o pipefail
+          source inputs.sh
+          source runtime-env.sh
+          if ! mkdir -p "${output_dir}" "${cache_dir}/tmp" 2> /dev/null || ! [ -w "${output_dir}" ] || ! [ -w "${cache_dir}/tmp" ]; then
+            echo "::error title=Error::Cannot create or write ${output_dir} and ${cache_dir}/tmp: choose a directory of yours in the form"
+            exit 1
+          fi
+          export APPTAINER_CACHEDIR="${cache_dir}" SINGULARITY_CACHEDIR="${cache_dir}"
+          export APPTAINER_TMPDIR="${cache_dir}/tmp" SINGULARITY_TMPDIR="${cache_dir}/tmp"
+          partial="${output_dir}/.${image_name}.${PW_RUN_SLUG}.partial"
+          trap 'rm -f "${partial}"' EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          rm -f "${partial}"
+          cmd=("${runtime_cmd}" build --force)
+          if [ "${build_fakeroot}" = true ]; then
+            cmd+=(--fakeroot)
+          fi
+          # the form's extra options, split like a shell command line (quotes honoured)
+          eval "extra=( $(cat build-options.txt) )"
+          cmd+=("${extra[@]}" "${partial}" "${PWD}/container.def")
+          echo "Host     : $(hostname)"
+          echo "Runtime  : ${runtime_version}"
+          echo "Image    : ${image}"
+          echo "Cache    : ${cache_dir}"
+          echo "Command  : ${cmd[*]}"
+          echo "Limit    : ${build_timeout_min} minutes"
+          echo "Started  : $(date)"
+          echo
+          t0=$(date +%s)
+          # in the background and waited for: bash runs a trap at once while in wait
+          # but only after a foreground pipeline ends
+          ( set -o pipefail; timeout -k 30 "${build_timeout_min}m" "${cmd[@]}" 2>&1 | tee "${PWD}/build.log" ) &
+          wait $!
+          status=$?
+          seconds=$(( $(date +%s) - t0 ))
+          echo
+          echo "Finished : $(date), ${seconds}s, status ${status}"
+          if [ "${status}" = 124 ]; then
+            echo "::error title=Error::The build did not finish within ${build_timeout_min} minutes and was killed (a stalled download, a build that needs more time); raise the limit in the form or check the tail of the output above"
+            exit 1
+          fi
+          if [ "${status}" != 0 ]; then
+            echo "::error title=Error::${runtime_name} build exited with status ${status}; the tail of its output follows"
+            tail -n 30 build.log
+            exit 1
+          fi
+          if ! [ -s "${partial}" ]; then
+            echo "::error title=Error::The build reported success but left no image at ${partial}"
+            exit 1
+          fi
+          mv -f "${partial}" "${image}"
+          chmod a+r "${image}"
+          size=$(du -h "${image}" | cut -f1)
+          echo "--- ${runtime_name} inspect ${image}"
+          "${runtime_cmd}" inspect "${image}" 2>&1 || true
+          echo "::notice title=Image built::${image} (${size}) in ${seconds}s with ${runtime_version}"
+          echo "IMAGE=${image}" | tee -a $OUTPUTS
+          echo "IMAGE_SIZE=${size}" | tee -a $OUTPUTS
+          echo "BUILD_SECONDS=${seconds}" | tee -a $OUTPUTS
+          echo "RUNTIME=${runtime_version}" | tee -a $OUTPUTS
+      # the %test section ran inside the build; this runs the finished file the way
+      # a job will, which also proves the node can mount a SIF
+      - name: Test the Image
+        run: |
+          set -o pipefail
+          source inputs.sh
+          source runtime-env.sh
+          test_command=$(cat test-command.txt)
+          if [ -z "$(printf '%s' "${test_command}" | tr -d '[:space:]')" ]; then
+            echo "::notice title=Image not tested::No test command was given; run it with ${runtime_name} exec ${image} <command>"
+            exit 0
+          fi
+          echo "Command  : ${runtime_name} exec ${image} /bin/sh -c '${test_command}'"
+          echo
+          timeout -k 30 600 "${runtime_cmd}" exec "${image}" /bin/sh -c "${test_command}" 2>&1 | tee test.out
+          status=$?
+          echo
+          if [ "${status}" = 124 ]; then
+            echo "::error title=Error::The test command did not finish within 10 minutes and was killed"
+            exit 1
+          fi
+          if [ "${status}" != 0 ]; then
+            echo "::error title=Error::The test command exited with status ${status} inside ${image}; its output is above"
+            exit 1
+          fi
+          echo "::notice title=Image tested::${test_command} ran inside ${image}: $(head -n 1 test.out)"
+          echo "::notice title=Run it::${runtime_name} run ${image}, or ${runtime_name} exec ${image} <command>; the definition is in ${PWD}/container.def"
+          echo "TEST_OUTPUT=${PWD}/test.out" | tee -a $OUTPUTS
+
+'on':
+  execute:
+    inputs:
+      resource:
+        type: compute-clusters
+        label: Compute resource
+        include-workspace: false
+        description: The image is built on its login node, which needs apptainer or singularity and access to the registry the definition bootstraps from.
+      container:
+        type: group
+        label: Container
+        items:
+          definition:
+            type: editor
+            label: Definition file
+            description: The definition the image is built from, as singularity build reads it.
+            default: |
+              Bootstrap: docker
+              From: python:3.12-slim
+
+              %post
+                  pip install --no-cache-dir numpy==2.3.3
+
+              %environment
+                  export PYTHONUNBUFFERED=1
+
+              %runscript
+                  exec python "$@"
+
+              %test
+                  python -c "import numpy; print('numpy', numpy.__version__)"
+            tooltip: |
+              A Bootstrap: line (docker, localimage, oras, library, ...) and the sections
+              the image needs: %post runs at build time (install packages, compile),
+              %environment is sourced in every container, %runscript is what
+              singularity run executes, %test runs at the end of the build and fails
+              it when it fails. Bootstrapping from docker:// fetches the image from
+              the registry, so the login node needs network access to it.
+          image_name:
+            type: string
+            label: Image file name
+            description: Written into the image directory; .sif is appended when missing and an existing image of that name is replaced.
+            default: container.sif
+          output_dir:
+            type: string
+            label: Image directory
+            description: An absolute path on the cluster, created when missing; the build cache goes to .cache under it unless set below.
+            default: ${HOME}/pw/software/containers
+            tooltip: |
+              Expanded by the shell, so ${HOME} and ${WORKDIR} work. On a DSRC system
+              point it at $WORKDIR or a project directory: home directories are small
+              and images are not.
+          test_command:
+            type: string
+            label: Test command
+            description: Run with singularity exec inside the built image through /bin/sh -c; a non-zero exit fails the run, empty skips the test.
+            default: cat /etc/os-release
+            tooltip: |
+              Proves the finished image mounts and runs on the login node, which the
+              %test section of the definition (run inside the build) does not. For
+              example python -c "import numpy", or mpirun --version. The image needs
+              a /bin/sh. Bounded by a 10-minute timeout.
+      build:
+        type: group
+        label: Build
+        items:
+          fakeroot:
+            type: boolean
+            label: Build with --fakeroot
+            description: Off lets the runtime choose; on asks for a user namespace mapped from the user's subuid range, which SingularityCE needs for a %post that installs packages.
+            default: false
+            tooltip: |
+              Apptainer builds unprivileged either way: it maps the user to root in a
+              namespace, using the subuid range when the user has one, and that is
+              enough for pip, dnf and apt in most images. The Prepare step prints
+              the subuid range and the user namespace limit of the node.
+          timeout_min:
+            type: number
+            label: Build time limit
+            description: Minutes, after which the build is killed and the run fails.
+            default: 60
+            min: 1
+            max: 1440
+            step: 1
+          options:
+            type: string
+            label: Extra build options
+            optional: true
+            description: Appended to the build command, for example --notest or --disable-cache.
+            tooltip: |
+              Anything singularity build accepts before the image and definition
+              paths. --notest skips the %test section; --disable-cache fetches
+              every layer again; Apptainer's --ignore-subuid --ignore-fakeroot-command
+              builds without any root emulation, as the plain user.
+          environment:
+            type: editor
+            label: Environment commands
+            optional: true
+            description: Leave empty to use the apptainer or singularity on PATH, else the first known module; otherwise the commands that provide one, one per line.
+            tooltip: |
+              Run before every step, in a shell where module is initialized. For
+              example module load singularity, or export https_proxy=... on a system
+              whose login node reaches registries through a proxy. Empty: the runtime
+              on PATH, else the first of the modules apptainer, singularity and
+              singularity-ce that loads. Commands that do not deliver a runtime
+              fail the run before anything is downloaded.
+          cache_dir:
+            type: string
+            label: Cache directory
+            optional: true
+            description: Holds the layer cache and the build scratch; empty puts it at .cache under the image directory.
+            tooltip: |
+              Set as APPTAINER_CACHEDIR and SINGULARITY_CACHEDIR, with tmp under it
+              as the build's TMPDIR: a build unpacks the whole image there, and /tmp
+              on a login node is often too small. A warm cache makes a rebuild from
+              the same base image a matter of seconds.
