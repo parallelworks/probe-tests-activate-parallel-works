@@ -1,7 +1,7 @@
 {
-  "name": "nautilus-login",
-  "platform": "activate.hpc.mil",
-  "user": "avidalto",
+  "name": "awshpc-login-1node-mpi-on-path",
+  "platform": "activate.parallel.works",
+  "user": "alvaro",
   "workflow_name": "mpi-hello",
   "workflow": {
     "repo": "github.com/parallelworks/probe-tests-activate-parallel-works",
@@ -9,15 +9,17 @@
     "ref": "hsp"
   },
   "timeout_s": 900,
-  "leftover_patterns": ["mpi_hello", "mpirun"],
+  "leftover_patterns": [
+    "mpi_hello",
+    "mpirun"
+  ],
   "inputs": {
-    "resource": "pw://avidalto/nautilus",
+    "resource": "pw://alvaro/awshpc",
     "cluster": {
       "scheduler": false,
       "ntasks_per_node": 2
     },
     "mpi": {
-      "load": "module load mpich/gnu/3.3.2\n",
       "launcher": "mpirun -np"
     }
   }

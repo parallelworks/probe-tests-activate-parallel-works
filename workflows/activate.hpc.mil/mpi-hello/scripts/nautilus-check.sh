@@ -10,7 +10,7 @@
 #   --account ACCT    SLURM account (--account); the job is submitted only when given
 #   --qos QOS         --qos (default standard; '' for none)
 #   --partition P     --partition (default general; '' for the cluster's default)
-#   --constraint C    --constraint (default standard; '' for none)
+#   --constraint C    --constraint (default none)
 #   --nodes N         --nodes (default 2)
 #   --ppn M           --ntasks-per-node, and the rank count on the login node (default 2)
 #   --time T          --time (default 00:10:00)
@@ -23,7 +23,7 @@ set -o pipefail
 ACCOUNT=""
 QOS="standard"
 PARTITION="general"
-CONSTRAINT="standard"
+CONSTRAINT=""
 NODES=2
 PPN=2
 TIME="00:10:00"
@@ -84,6 +84,10 @@ if ! command -v module > /dev/null 2>&1; then
 fi
 echo "\$ module --version"; module --version 2>&1 | head -n 3
 echo "\$ module avail mpi"; module avail mpi 2>&1
+# module avail <name> matches names that start with it: the full list, filtered, shows
+# every MPI (cray-mpich, intel/mpi, PrgEnv-*) and the compiler modules an MPI needs
+echo "\$ module -t avail 2>&1 | grep -i -E 'mpi|PrgEnv|craype|intel/compiler|gcc|aocc'"
+module -t avail 2>&1 | grep -i -E 'mpi|PrgEnv|craype|intel/compiler|gcc|aocc' | head -n 40
 echo "\$ module show ${MPI_MODULE}"; module show "${MPI_MODULE}" 2>&1 | head -n 40
 
 section "3. SLURM"
@@ -131,8 +135,9 @@ int main(int argc, char **argv) {
 EOF
 echo "\$ module load ${MPI_MODULE}"; module load "${MPI_MODULE}" 2>&1
 show 10 'command -v mpicc mpirun mpiexec srun'
-show 10 'mpichversion | head -n 4'
+show 10 'mpichversion'
 show 10 'mpicc -show'
+show 10 'ip -brief address 2>/dev/null || hostname -I; getent hosts "$(hostname)"'
 show 10 'mpirun --version 2>&1 | head -n 3'
 echo "\$ mpicc -O2 -o mpi_hello mpi_hello.c"
 if mpicc -O2 -o mpi_hello mpi_hello.c; then echo "compiled"; else echo "COMPILE FAILED"; fi
@@ -184,6 +189,11 @@ module load "${MPI_MODULE}"
 ntasks="${SLURM_NTASKS:-$(( SLURM_JOB_NUM_NODES * ${SLURM_NTASKS_PER_NODE:-1} ))}"
 echo "node $(hostname), SLURM job ${SLURM_JOB_ID} on ${SLURM_JOB_NODELIST}: ${ntasks} tasks on ${SLURM_JOB_NUM_NODES} nodes (SLURM_NTASKS=${SLURM_NTASKS:-unset}, SLURM_NTASKS_PER_NODE=${SLURM_NTASKS_PER_NODE:-unset})"
 echo "mpirun: $(command -v mpirun)"
+echo
+# the addresses the nodes have and the one their hostnames resolve to: Hydra's proxies
+# connect back to the first node through the latter, and -iface <interface> changes that
+echo "=== node addresses"
+srun -N "${SLURM_JOB_NUM_NODES}" --ntasks-per-node=1 bash -c 'echo "$(hostname): resolves to $(getent hosts "$(hostname)" | cut -d" " -f1); interfaces: $(ip -brief address 2>/dev/null | awk "{print \$1\"=\"\$3}" | tr "\n" " ")"' 2>&1
 echo
 echo "=== srun --mpi=list"
 srun --mpi=list 2>&1

@@ -93,13 +93,13 @@ node) and compiles and runs the hello world on the login node with `mpirun -np 2
 Then, with the account the output lists:
 
 ```bash
-bash scripts/nautilus-check.sh --account <account> --qos standard --constraint standard
+bash scripts/nautilus-check.sh --account hpcmo49636prw --qos standard --module mpich/intel/3.3.2
 ```
 
-submits one 2-node SLURM job that runs the program with `mpirun`, `srun --mpi=pmi2`
-and `srun`, waits up to 20 minutes for it and prints its output. The two outputs
-decide the test inputs: the account and QoS, whether `standard` is a valid constraint,
-and which launcher `mpi.launcher` should default to.
+submits one 2-node SLURM job that prints the nodes' network addresses and runs the
+program with `mpirun`, `srun --mpi=pmi2` and `srun`, waits up to 20 minutes for it
+and prints its output. The two outputs decide the test inputs: the account and QoS,
+and which launcher `mpi.launcher` should carry.
 
 ## Running from the CLI
 
@@ -144,29 +144,47 @@ From anywhere: `pw workflows runs errors <slug>` and `pw workflows runs logs <sl
 
 ## Tests
 
-`tests/hsp/nautilus-compute.json` (two nodes, two ranks per node, through SLURM)
-and `tests/hsp/nautilus-login.json` (two ranks on the login node) are the inputs
-in the format of the workflows repository's test runner (`_test` is stripped before
-launch). The same inputs, as PROBE definitions, are
-`tests/activate.hpc.mil/avidalto/mpi-hello/nautilus-compute.json` and
-`nautilus-login.json` at the root of this repository; they point `workflow.repo` at
-this repository and `workflow.ref` at the `hsp` branch.
+A test is named after the cluster, the partition (or `login`), the node count and
+the MPI load command: `<cluster>-<partition>-<N>nodes-<module>`. Each exists twice:
+under `tests/hsp/` here, in the format of the workflows repository's test runner
+(`_test` is stripped before launch), and as a PROBE definition under
+`tests/<platform>/<user>/mpi-hello/` at the root of this repository, pointing
+`workflow.repo` at this repository and `workflow.ref` at the `hsp` branch. A test is
+added only from inputs that were submitted on the platform.
 
-`tests/hsp/awshpc-login.json` (the environment commands left empty: the Amazon
-Open MPI already on PATH is used) and `tests/hsp/awshpc-compute.json` (two cloud
-nodes, `module load mpi/mpich-x86_64`, MPICH 4.1.1) run the same workflow on
-`pw://alvaro/awshpc` of activate.parallel.works; their PROBE definitions are under
-`tests/activate.parallel.works/alvaro/mpi-hello/`. They are how the workflow is tested
-end to end before a run on HSP, from a `parallelworks/workflows` checkout, and both
-passed on 2026-10-21 (runs `fancy-platypus`, 40 s, and `national-slug`, 291 s with the
-cloud nodes' boot; two ranks on each of two nodes, Allreduce correct, no leftovers):
+- `nautilus-general-2nodes-mpich-intel-3.3.2` (activate.hpc.mil, avidalto): Nautilus,
+  partition `general`, two nodes with two ranks each, `module load mpich/intel/3.3.2`,
+  account `hpcmo49636prw`, QoS `standard`, no node type, no walltime (the partition's
+  default; the program itself is bounded by the script's 10-minute timeout). Those
+  inputs were submitted from the platform on 2026-10-21 with the `mpirun -np` launcher
+  and the job ran but did not finish (Troubleshooting below); the test carries
+  `srun --mpi=pmi2 -n` as the launcher, still to be confirmed by a passing run.
+- `awshpc-compute-2nodes-mpich-x86_64` (activate.parallel.works, alvaro): two cloud
+  nodes of `pw://alvaro/awshpc`, partition `compute`, `module load mpi/mpich-x86_64`
+  (MPICH 4.1.1). Passed through PROBE on 2026-10-21 (run `national-slug`, 291 s with
+  the cloud nodes' boot; two ranks on each of two nodes, Allreduce correct, no leftovers).
+- `awshpc-login-1node-mpi-on-path` (activate.parallel.works, alvaro): two ranks on the
+  awshpc login node with the environment commands left empty, so the Amazon Open MPI
+  already on PATH is used. Passed on 2026-10-21 (run `fancy-platypus`, 40 s).
+
+The awshpc tests are how the workflow is tested end to end from the cloud before a
+run on HSP, from a `parallelworks/workflows` checkout:
 
 ```bash
 cd workflows/probe/app
 python3 -m probe run --tests /path/to/probe-tests-activate-parallel-works/tests --results results \
-    --test activate.parallel.works/alvaro/mpi-hello/awshpc-login.json
+    --test activate.parallel.works/alvaro/mpi-hello/awshpc-login-1node-mpi-on-path.json
 ```
 
-The account in them (`hpcmo49636prw`) is the one the `rag-vllm` Nautilus test of
-the workflows repository used in September 2026; `scripts/nautilus-check.sh` prints
-the accounts and QoS the user can submit with, to confirm it before the first run.
+## Troubleshooting
+
+- **`HYDU_sock_connect ... unable to connect from <node 2> to <node 1> (Connection
+  refused)`, then `srun: error: ... task 1: Exited with exit code 5`, and the job
+  sits until the 10-minute timeout** (Nautilus, `mpich/intel/3.3.2`, `mpirun -np`,
+  2026-10-21). MPICH's Hydra started its proxies with `srun`, but the proxy on the
+  second node could not open a TCP connection to the one on the first node at the
+  address its hostname resolves to. Launch with SLURM instead (`srun --mpi=pmi2 -n`:
+  SLURM starts the ranks and serves PMI, no Hydra sockets), or point Hydra at the
+  interface the nodes reach each other on (`mpirun -iface <interface> -np`, the
+  interface from `ip -brief address` on a node). `scripts/nautilus-check.sh` with an
+  account prints the nodes' addresses and tries the three launchers in one job.

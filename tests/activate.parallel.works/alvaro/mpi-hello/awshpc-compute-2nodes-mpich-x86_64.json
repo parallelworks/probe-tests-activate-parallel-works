@@ -1,5 +1,5 @@
 {
-  "name": "awshpc-compute",
+  "name": "awshpc-compute-2nodes-mpich-x86_64",
   "platform": "activate.parallel.works",
   "user": "alvaro",
   "workflow_name": "mpi-hello",
@@ -9,7 +9,10 @@
     "ref": "hsp"
   },
   "timeout_s": 3600,
-  "leftover_patterns": ["mpi_hello", "mpirun"],
+  "leftover_patterns": [
+    "mpi_hello",
+    "mpirun"
+  ],
   "inputs": {
     "resource": "pw://alvaro/awshpc",
     "cluster": {

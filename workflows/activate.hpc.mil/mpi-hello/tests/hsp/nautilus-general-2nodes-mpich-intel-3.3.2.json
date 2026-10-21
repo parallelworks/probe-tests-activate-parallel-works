@@ -14,13 +14,13 @@
       "account": "hpcmo49636prw",
       "partition": "general",
       "qos": "standard",
-      "node_type": "standard",
-      "time": "00:10:00",
+      "node_type": "",
+      "time": "",
       "scheduler_directives": "##SBATCH --constraint=mla # uncomment for Navy and AFRL DSRC systems\n"
     }
   },
   "mpi": {
-    "load": "module load mpich/gnu/3.3.2\n",
-    "launcher": "mpirun -np"
+    "load": "module load mpich/intel/3.3.2",
+    "launcher": "srun --mpi=pmi2 -n"
   }
 }
