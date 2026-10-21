@@ -1,0 +1,30 @@
+{
+  "name": "awssmall-rocky9-260928-login-python-numpy-workdir",
+  "platform": "activate.hpc.mil",
+  "user": "avidalto",
+  "workflow_name": "singularity-build",
+  "workflow": {
+    "repo": "github.com/parallelworks/probe-tests-activate-parallel-works",
+    "path": "workflows/activate.hpc.mil/singularity-build/yamls/hsp.yaml",
+    "ref": "hsp-tests-singularity"
+  },
+  "timeout_s": 3600,
+  "warm_marker": "${WORKDIR}/pw/containers/.cache/cache/blob",
+  "inputs": {
+    "resource": "pw://avidalto/awssmall",
+    "container": {
+      "definition": "Bootstrap: docker\nFrom: python:3.12-slim\n\n%post\n    pip install --no-cache-dir numpy==2.3.3\n\n%environment\n    export PYTHONUNBUFFERED=1\n\n%runscript\n    exec python \"$@\"\n\n%test\n    python -c \"import numpy; print('numpy', numpy.__version__)\"\n",
+      "image_name": "python-numpy.sif",
+      "output_dir": "${WORKDIR}/pw/containers",
+      "test_command": "python -c \"import numpy; print('numpy', numpy.__version__)\""
+    },
+    "build": {
+      "fakeroot": false,
+      "timeout_min": 30,
+      "options": "",
+      "environment": "",
+      "cache_dir": "",
+      "tmp_dir": ""
+    }
+  }
+}

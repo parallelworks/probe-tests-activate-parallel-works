@@ -1,0 +1,30 @@
+{
+  "name": "awssmall-rocky9-260928-login-rocky9-mpich-fakeroot",
+  "platform": "activate.hpc.mil",
+  "user": "avidalto",
+  "workflow_name": "singularity-build",
+  "workflow": {
+    "repo": "github.com/parallelworks/probe-tests-activate-parallel-works",
+    "path": "workflows/activate.hpc.mil/singularity-build/yamls/hsp.yaml",
+    "ref": "hsp-tests-singularity"
+  },
+  "timeout_s": 3600,
+  "warm_marker": "${HOME}/pw/software/containers/.cache/cache/blob",
+  "inputs": {
+    "resource": "pw://avidalto/awssmall",
+    "container": {
+      "definition": "Bootstrap: docker\nFrom: rockylinux:9\n\n%post\n    dnf install -y --setopt=install_weak_deps=False gcc mpich mpich-devel && dnf clean all\n    mkdir -p /opt/mpi\n    printf '%s\\n' \\\n        '#include <mpi.h>' \\\n        '#include <stdio.h>' \\\n        'int main(int argc, char **argv) {' \\\n        '    int rank, size, len, sum = 0, expected;' \\\n        '    char name[MPI_MAX_PROCESSOR_NAME];' \\\n        '    MPI_Init(&argc, &argv);' \\\n        '    MPI_Comm_rank(MPI_COMM_WORLD, &rank);' \\\n        '    MPI_Comm_size(MPI_COMM_WORLD, &size);' \\\n        '    MPI_Get_processor_name(name, &len);' \\\n        '    printf(\"Hello from rank %d of %d on %s\\n\", rank, size, name);' \\\n        '    MPI_Allreduce(&rank, &sum, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);' \\\n        '    expected = size * (size - 1) / 2;' \\\n        '    if (rank == 0) printf(\"Allreduce of the ranks: %d (expected %d): %s\\n\", sum, expected, sum == expected ? \"OK\" : \"WRONG\");' \\\n        '    MPI_Finalize();' \\\n        '    return sum == expected ? 0 : 1;' \\\n        '}' > /opt/mpi/mpi_hello.c\n    export PATH=/usr/lib64/mpich/bin:$PATH\n    mpicc -O2 -o /opt/mpi/mpi_hello /opt/mpi/mpi_hello.c\n\n%environment\n    export PATH=/usr/lib64/mpich/bin:$PATH\n\n%runscript\n    exec mpirun -np 2 /opt/mpi/mpi_hello\n\n%test\n    mpirun -np 2 /opt/mpi/mpi_hello\n",
+      "image_name": "rocky9-mpich.sif",
+      "output_dir": "${HOME}/pw/software/containers",
+      "test_command": "mpirun -np 2 /opt/mpi/mpi_hello"
+    },
+    "build": {
+      "fakeroot": true,
+      "timeout_min": 30,
+      "options": "",
+      "environment": "",
+      "cache_dir": "",
+      "tmp_dir": ""
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "fran-login-alpine-norootemulation",
+  "platform": "activate.hpc.mil",
+  "user": "avidalto",
+  "workflow_name": "singularity-build",
+  "workflow": {
+    "repo": "github.com/parallelworks/probe-tests-activate-parallel-works",
+    "path": "workflows/activate.hpc.mil/singularity-build/yamls/hsp.yaml",
+    "ref": "hsp-tests-singularity"
+  },
+  "timeout_s": 3600,
+  "warm_marker": "${HOME}/pw/software/containers/.cache/cache/blob",
+  "inputs": {
+    "resource": "pw://avidalto/fran",
+    "container": {
+      "definition": "Bootstrap: docker\nFrom: alpine:3.20\n\n%post\n    echo \"built with no root emulation on $(date -u +%FT%TZ)\" > /etc/built-at\n\n%runscript\n    cat /etc/built-at\n\n%test\n    test -s /etc/built-at\n",
+      "image_name": "alpine.sif",
+      "output_dir": "${HOME}/pw/software/containers",
+      "test_command": "cat /etc/alpine-release && cat /etc/built-at"
+    },
+    "build": {
+      "fakeroot": false,
+      "timeout_min": 30,
+      "options": "--ignore-subuid --ignore-fakeroot-command",
+      "environment": "",
+      "cache_dir": "",
+      "tmp_dir": ""
+    }
+  }
+}

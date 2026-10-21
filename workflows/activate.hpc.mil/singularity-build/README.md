@@ -108,7 +108,7 @@ environment commands, or from PATH and the known modules when they are left empt
 | System | Runtime | Environment commands | Verified |
 |---|---|---|---|
 | gcpsmall (Google cluster of activate.parallel.works) | Apptainer 1.4.5 on PATH, `subuid` configured, no proxy | empty | 2026-10-21, all three test definitions |
-| Nautilus (Navy DSRC) | Apptainer 1.3.6 on PATH, `subuid` mapping, reaches Docker Hub; home is a network filesystem, so the build scratch must stay on the local disk (the default) | empty | first run 2026-10-21 failed on the scratch under home; rerun pending |
+| Nautilus (Navy DSRC) | Apptainer 1.3.6 on PATH, `subuid` mapping, reaches Docker Hub; home is a network filesystem, so the build scratch must stay on the local disk (the default) | empty | 2026-10-21, `python-numpy-auto`, by hand on the platform |
 | FRAN (ARL DSRC) | to be recorded from the first run | | |
 | awssmall (AWS cluster of activate.hpc.mil) | to be recorded from the first run | | |
 
@@ -207,7 +207,8 @@ working alternative is a second test, not a change to the first.
 ## Tests
 
 A test is named after the cluster, `login`, the definition and the root emulation it
-was submitted with: `<cluster>-login-<definition>-<auto|fakeroot|norootemulation>`.
+was submitted with: `<cluster>-login-<definition>-<auto|fakeroot|norootemulation>`,
+or what else it varies (`workdir`).
 The definitions live under `tests/<platform>/<user>/singularity-build/` at the root
 of this repository, point `workflow.repo` at this repository and `workflow.ref` at the
 branch the workflow is on (`hsp-tests-singularity` while it is developed there), and
@@ -223,6 +224,9 @@ The definitions the tests build, each a few minutes at most on a warm cache:
 | `python-numpy` (the form's default) | `pip install` in `%post` from `python:3.12-slim`, a `%test` import, the test command run in the finished image |
 | `rocky9-gcc` | `dnf install gcc` and a compile in `%post` from `rockylinux:9`: a `%post` that acts as root, submitted with `--fakeroot` |
 | `alpine` | the smallest build, submitted with Apptainer's `--ignore-subuid --ignore-fakeroot-command`: no root emulation at all |
+| `rocky9-mpich` | MPICH from Rocky 9's AppStream and an MPI hello world compiled in `%post`; two ranks run inside the finished image with the container's own `mpirun`, Allreduce checked: the container an HPC job would run |
+| `multistage` | a two-stage definition: compiled with gcc in a `rockylinux:9` stage, copied with `%files from` into a `rockylinux:9-minimal` image without the compiler |
+| `python-numpy-workdir` (DSRC systems) | the default definition with the image and cache under `$WORKDIR`, where a DSRC keeps large files; shows whether a workflow step sees `WORKDIR` |
 
 The gcpsmall tests (`gcpsmall-login-*`) are how the workflow is tested from the cloud
-before a run on HSP; all three passed through `python3 -m probe run` on 2026-10-21.
+before a run on HSP; all five passed through `python3 -m probe run` on 2026-10-21.
