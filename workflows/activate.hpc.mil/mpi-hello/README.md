@@ -157,6 +157,13 @@ with, and a working alternative is a second test, not a change to the first.
   sockets; the `PMI :` line lists the plugins `srun` offers), which passed on
   Nautilus the same day, or point Hydra at the interface the nodes reach each other
   on, `mpirun -iface <interface> -np`.
+- **`ERROR: Unable to locate a modulefile for 'mpi/latest'`** in preprocessing, for a
+  module `module avail` lists in a login shell (FRAN, 2026-10-21): the platform's
+  steps are not login shells, and the site's module directory (`/p/app/modulefiles`)
+  is added to MODULEPATH by a login-only profile. The workflow adds the HPCMP
+  directories `/p/app/modulefiles` and `/p/app/site/modulefiles` itself when they
+  exist; for another directory, put `module use <directory>` before the `module load`
+  in the environment commands.
 - **`The ranks reported a world size of 1 where N were launched`** with an `srun`
   launcher: the ranks started but found no PMI, so each ran alone. Intel MPI under
   `srun` needs SLURM's PMI library named in the environment commands, for example

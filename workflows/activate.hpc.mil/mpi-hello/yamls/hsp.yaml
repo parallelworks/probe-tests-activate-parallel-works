@@ -75,6 +75,18 @@ jobs:
                   fi
               done
           fi
+          # the HPCMP site module directories: a login shell has them on MODULEPATH, a
+          # workflow step may not (FRAN keeps mpi/latest in /p/app/modulefiles)
+          if command -v module > /dev/null 2>&1; then
+              for d in /p/app/modulefiles /p/app/site/modulefiles; do
+                  if [ -d "${d}" ]; then
+                      case ":${MODULEPATH:-}:" in
+                          *":${d}:"*) ;;
+                          *) module use "${d}" > /dev/null 2>&1 || true ;;
+                      esac
+                  fi
+              done
+          fi
           EOF
           launcher_cmd="${mpi_launcher%% *}"
           # does a fresh shell that sources mpi-env.sh and runs the snippet have mpicc and the launcher?
