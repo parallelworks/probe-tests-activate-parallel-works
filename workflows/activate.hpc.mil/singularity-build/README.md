@@ -108,7 +108,7 @@ environment commands, or from PATH and the known modules when they are left empt
 | System | Runtime | Environment commands | Verified |
 |---|---|---|---|
 | gcpsmall (Google cluster of activate.parallel.works) | Apptainer 1.4.5 on PATH, `subuid` configured, no proxy | empty | 2026-10-21, all three test definitions |
-| Nautilus (Navy DSRC) | Apptainer 1.3.6 on PATH, `subuid` mapping, reaches Docker Hub; home is a network filesystem, so the build scratch must stay on the local disk (the default) | empty | 2026-10-21, `python-numpy-auto`, by hand on the platform |
+| Nautilus (Navy DSRC) | Apptainer 1.3.6 on PATH, `subuid` mapping, reaches Docker Hub; home is a network filesystem, so the build scratch must stay on the local disk (the default) | empty | 2026-10-21, `python-numpy-auto` and `rocky9-mpich-fakeroot`, by hand on the platform |
 | FRAN (ARL DSRC) | to be recorded from the first run | | |
 | awssmall (AWS cluster of activate.hpc.mil) | to be recorded from the first run | | |
 
