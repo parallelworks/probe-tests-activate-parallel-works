@@ -42,7 +42,7 @@ reachable they live on this branch, beside the activate.parallel.works ones:
 
 ```
 tests/activate.hpc.mil/<user>/<workflow_name>/<name>.json   the definitions
-workflows/activate.hpc.mil/<workflow_name>/                  the workflows they launch: the YAML under yamls/, a README,
+workflows/activate.hpc.mil/<workflow_name>/                  the workflows they launch: yamls/hsp.yaml, a README,
                                                              helper scripts
 ```
 

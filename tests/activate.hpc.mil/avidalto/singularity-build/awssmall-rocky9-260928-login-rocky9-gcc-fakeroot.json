@@ -5,7 +5,7 @@
   "workflow_name": "singularity-build",
   "workflow": {
     "repo": "github.com/parallelworks/probe-tests-activate-parallel-works",
-    "path": "workflows/activate.hpc.mil/singularity-build/yamls/general.yaml",
+    "path": "workflows/activate.hpc.mil/singularity-build/yamls/hsp.yaml",
     "ref": "hsp-tests-singularity"
   },
   "timeout_s": 3600,

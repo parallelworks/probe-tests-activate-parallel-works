@@ -11,14 +11,15 @@ reach, a `%post` that fails, a `%test` that fails, an image that does not run. N
 is submitted to the scheduler, no endpoint is registered, and nothing is left behind
 but the image and its cache.
 
-It runs on the login node only, so it keeps one `yamls/general.yaml` for every
-platform: on an HSP (`activate.hpc.mil`) system it initializes `module` and adds the
+It is an HSP (`activate.hpc.mil`) workflow: it initializes `module` and adds the
 HPCMP module directories itself (a workflow step is not a login shell), and the form's
-environment commands take `module load singularity` or a proxy export where one is
-needed. On a cloud cluster of another platform nothing differs.
+environment commands take `module load singularity` or a proxy export where a system
+needs one. It runs on the login node only and submits nothing, so the same file runs
+unchanged on a cloud cluster of another platform, which is how it is tested from
+activate.parallel.works.
 
-`yamls/general.yaml` is the whole workflow: every script is written by its steps
-from heredocs, so a run checks nothing out of this repository and fetches nothing from
+`yamls/hsp.yaml` is the whole workflow: every script is written by its steps from
+heredocs, so a run checks nothing out of this repository and fetches nothing from
 GitHub. The tests that launch it are the PROBE definitions under
 `tests/<platform>/<user>/singularity-build/` at the root of this repository (Tests,
 below); nothing in this directory names a user or a system's credentials.
@@ -127,8 +128,8 @@ an inputs JSON. The `inputs` object of a PROBE definition is one; the shape is:
 From a shell with `pw` authenticated against the platform:
 
 ```bash
-pw workflows run --dry-run /abs/path/yamls/general.yaml -i inputs.json   # validates, runs nothing
-pw workflows run /abs/path/yamls/general.yaml -i inputs.json
+pw workflows run --dry-run /abs/path/yamls/hsp.yaml -i inputs.json   # validates, runs nothing
+pw workflows run /abs/path/yamls/hsp.yaml -i inputs.json
 ```
 
 A run passes when it reaches `completed`; its Build step prints a notice with the
