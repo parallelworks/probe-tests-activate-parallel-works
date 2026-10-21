@@ -47,9 +47,12 @@ One job, `build`, on the login node:
    run when a fresh shell that sources the file has no runtime. Then prints what an
    unprivileged build depends on: the runtime version, the user's `subuid` range,
    the user namespace limit, the `allow setuid` setting, the proxy variables, `HOME`,
-   `WORKDIR` and `TMPDIR`, and the filesystem and free space of the image, cache and
-   scratch directories, with a warning when the scratch is on a network filesystem
-   (Root emulation, below).
+   `WORKDIR` and `TMPDIR`, `proot`, and the filesystem and free space of the image,
+   cache and scratch directories. The build scratch is the form's directory or,
+   when it is empty, the first of `TMPDIR`, `/tmp`, `/var/tmp` and `/dev/shm` that
+   is writable, not mounted `noexec` and on a local filesystem (each option is listed
+   with what disqualified it), with a warning when the one picked is `noexec` or a
+   network filesystem (Root emulation, below).
 3. **Write the Definition File**: `container.def` from the form; fails when it is
    empty or has no `Bootstrap:` line.
 4. **Build the Image**: `<runtime> build --force [--fakeroot] [options] <partial>
@@ -75,12 +78,12 @@ One job, `build`, on the login node:
 | Image file name | Written into the image directory; `.sif` appended when missing; an existing image of that name is replaced. |
 | Image directory | Absolute path, created when missing, expanded by the shell (`${HOME}`, `${WORKDIR}`). Default `${HOME}/pw/software/containers`; on a DSRC system point it at `$WORKDIR` or a project directory. |
 | Test command | Run inside the built image through `/bin/sh -c` after the build; empty skips it. Default `cat /etc/os-release`. |
-| Build with --fakeroot | Off lets the runtime choose how to emulate root in `%post`; on passes `--fakeroot`, which maps the user's `subuid` range and is what SingularityCE needs for a `%post` that installs packages. |
+| Build with --fakeroot | Off lets Apptainer choose its root emulation and gives SingularityCE `--fakeroot` when the user has a `subuid` range; on always passes `--fakeroot`. |
 | Build time limit | Minutes; the build is killed and the run fails when it is exceeded. Default 60. |
 | Extra build options | Appended to the build command: `--notest`, `--disable-cache`, Apptainer's `--ignore-subuid --ignore-fakeroot-command` (no root emulation at all). |
 | Environment commands | Empty finds the runtime itself (the step's PATH, the usual install directories, the login shell's PATH, the known modules); otherwise the commands that provide one or set a proxy, one per line, run before every step. |
 | Cache directory | The downloaded image layers. Empty: `.cache` under the image directory; a shared filesystem is fine. |
-| Build scratch directory | Where the build unpacks the image, a local disk with room for the uncompressed image. Empty: the node's `TMPDIR` or `/tmp`. |
+| Build scratch directory | Where the build unpacks the image, with room for the uncompressed image. Empty: the first of `TMPDIR`, `/tmp`, `/var/tmp` and `/dev/shm` that is writable, not mounted `noexec` and on a local disk. |
 
 ## Root emulation
 
@@ -93,18 +96,23 @@ image's root filesystem, and the runtimes differ:
   `subuid` configured) `pip install`, `dnf install` and `gcc` in `%post` all build with
   the box off, with it on, and even with `--ignore-subuid --ignore-fakeroot-command`
   (verified 2026-10-21).
-- **SingularityCE** needs `--fakeroot` (a `subuid` range the site configured) for a
-  `%post` that acts as root, or `proot` on PATH (4.1 and later) for a rootless build.
-  The Prepare step prints the `subuid` range so a `--fakeroot` failure can be read
-  against it.
+- **SingularityCE** has no cascade: as a non-root user it refuses a definition file
+  outright (`--remote, --fakeroot, or the proot command are required to build this
+  source as a non-root user`, awssmall 4.5.1, 2026-10-21) unless `--fakeroot` is
+  passed with a `subuid` range the site configured, or `proot` is on PATH (4.1 and
+  later). With the box off the workflow therefore adds `--fakeroot` for SingularityCE
+  when the user has a range and says so; without a range or `proot` the build fails
+  and the error names the cause. The Prepare step prints the range and `proot`.
 - **With a `subuid` mapping the build scratch must be a local disk.** Apptainer's
   admin guide says a `--fakeroot` build cannot use NFS, Lustre, GPFS or PanFS as
   `TMPDIR`, and the failure is `packer failed to pack: while unpacking tmpfs: error
   unpacking rootfs: mkdir rootfs: ... no such file or directory` right after the
   layers were copied (Nautilus, 2026-10-21, with the scratch under the home
-  directory). The layer cache has no such restriction. That is why the scratch
-  defaults to the node's `TMPDIR` or `/tmp`, Apptainer's own default, and is a
-  separate input from the cache.
+  directory). The layer cache has no such restriction. And Apptainer refuses a
+  scratch mounted `noexec` (`'noexec' mount option set on /tmp, temporary root
+  filesystem won't be usable at this location`, FRAN, 2026-10-21). That is why the
+  scratch is a separate input from the cache and, left empty, is chosen among
+  `TMPDIR`, `/tmp`, `/var/tmp` and `/dev/shm` by those two checks.
 
 ## Other systems
 
@@ -115,8 +123,8 @@ environment commands, or from PATH and the known modules when they are left empt
 |---|---|---|---|
 | gcpsmall (Google cluster of activate.parallel.works) | Apptainer 1.4.5 on PATH, `subuid` configured, no proxy | empty | 2026-10-21, all three test definitions |
 | Nautilus (Navy DSRC) | Apptainer 1.3.6 on PATH, `subuid` mapping, reaches Docker Hub; home is a network filesystem, so the build scratch must stay on the local disk (the default) | empty | 2026-10-21, `python-numpy-auto` and `rocky9-mpich-fakeroot`, by hand on the platform |
-| FRAN (ARL DSRC) | Apptainer in `/opt/apptainer/bin` (`singularity` is its alias there), added to PATH by the login profile only | empty | first run 2026-10-21 found no runtime (the step's PATH lacks the directory; fixed); rerun pending |
-| awssmall (AWS cluster of activate.hpc.mil) | `singularity` in `/usr/local/bin`, which the step's PATH lacks | empty | first run 2026-10-21 found no runtime (fixed); rerun pending |
+| FRAN (ARL DSRC) | Apptainer 1.5.3 in `/opt/apptainer/bin` (`singularity` is its alias there), added to PATH by the login profile only; `/tmp` is mounted `noexec`, so the scratch has to be elsewhere | empty | 2026-10-21: the runtime lookup and the `noexec` refusal each failed one run and were fixed; rerun pending |
+| awssmall (AWS cluster of activate.hpc.mil) | SingularityCE 4.5.1 in `/usr/local/bin`, which the step's PATH lacks; refuses a definition file without `--fakeroot` or `proot` | empty | 2026-10-21: the runtime lookup and the `--fakeroot` refusal each failed one run and were fixed; rerun pending |
 
 ## Running it
 
@@ -203,6 +211,14 @@ working alternative is a second test, not a change to the first.
   after the layers were copied: the build scratch is on a network filesystem and the
   build runs with a `subuid` mapping (Root emulation, above). The Prepare step warns
   about it before the build. Set the build scratch directory to a local disk.
+- **`'noexec' mount option set on <dir>, temporary root filesystem won't be usable`**:
+  Apptainer refuses the scratch. The Prepare step lists the options it checked
+  (`scratch options:`) with `noexec` marked; set the build scratch directory to one
+  mounted without it, on a local disk.
+- **`--remote, --fakeroot, or the proot command are required to build this source
+  as a non-root user`**: SingularityCE without a `subuid` range for the user and
+  without `proot` (Root emulation, above). Ask the site for either; a definition
+  whose `%post` needs no root can bootstrap from a prebuilt image instead.
 - **`No space left on device` during the build**: the scratch filesystem is full (the
   build unpacks the whole image there). Set the build scratch directory to a larger
   local filesystem; the cache directory holds the compressed layers and can stay.

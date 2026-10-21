@@ -53,8 +53,6 @@ jobs:
           case "${build_cache_dir}" in '~') build_cache_dir="${HOME}" ;; '~/'*) build_cache_dir="${HOME}/${build_cache_dir#\~/}" ;; esac
           case "${build_tmp_dir}" in '~') build_tmp_dir="${HOME}" ;; '~/'*) build_tmp_dir="${HOME}/${build_tmp_dir#\~/}" ;; esac
           cache_dir="${build_cache_dir:-${output_dir}/.cache}"
-          # the build unpacks the image here: the runtime's own default, a local disk
-          tmp_dir="${build_tmp_dir:-${TMPDIR:-/tmp}}"
           if ! [[ "${image_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
             echo "::error::The image file name must be letters, digits, dots, dashes and underscores, got '${image_name}'"
             exit 1
@@ -66,14 +64,14 @@ jobs:
           fi
           case "${output_dir}" in /*) ;; *) echo "::error::The image directory must be an absolute path, got '${output_dir}'"; exit 1 ;; esac
           case "${cache_dir}" in /*) ;; *) echo "::error::The cache directory must be an absolute path, got '${cache_dir}'"; exit 1 ;; esac
-          case "${tmp_dir}" in /*) ;; *) echo "::error::The build scratch directory must be an absolute path, got '${tmp_dir}'"; exit 1 ;; esac
+          case "${build_tmp_dir}" in ''|/*) ;; *) echo "::error::The build scratch directory must be an absolute path, got '${build_tmp_dir}'"; exit 1 ;; esac
           # the resolved values replace the raw form lines
           sed -i '/^export \(image_name\|output_dir\|build_fakeroot\|build_cache_dir\|build_tmp_dir\|build_timeout_min\)=/d' inputs.sh
           {
             echo "export image_name=\"${image_name}\""
             echo "export output_dir=\"${output_dir}\""
             echo "export cache_dir=\"${cache_dir}\""
-            echo "export tmp_dir=\"${tmp_dir}\""
+            echo "export build_tmp_dir=\"${build_tmp_dir}\""
             echo "export image=\"${output_dir}/${image_name}\""
             echo "export build_timeout_min=\"${build_timeout_min}\""
             echo "export build_fakeroot=\"${build_fakeroot:-false}\""
@@ -180,10 +178,16 @@ jobs:
           runtime_cmd=$(echo "${out}" | tail -n 1)
           source runtime-env.sh
           runtime_version=$("${runtime_cmd}" --version 2>&1 | head -n 1)
+          # SingularityCE has no root-emulation cascade of its own: the Build step adds
+          # --fakeroot for it when the user has a subuid range
+          case "${runtime_version}" in apptainer*) runtime_flavor=apptainer ;; *) runtime_flavor=singularity-ce ;; esac
+          subuid_range=$(grep -E "^$(id -un):" /etc/subuid 2> /dev/null | head -n 1)
           {
             echo "export runtime_cmd=\"${runtime_cmd}\""
             echo "export runtime_name=\"$(basename "${runtime_cmd}")\""
             echo "export runtime_version=\"${runtime_version}\""
+            echo "export runtime_flavor=\"${runtime_flavor}\""
+            echo "export subuid_range=\"${subuid_range}\""
           } >> inputs.sh
           echo "::notice title=Container runtime::${runtime_version} at ${runtime_cmd}, from ${found}"
           echo "--- runtime-env.sh"
@@ -191,7 +195,8 @@ jobs:
           # what an unprivileged build depends on, for the log of a failing system
           echo "--- build capabilities on $(hostname)"
           echo "Runtime        : ${runtime_version} (${runtime_cmd})"
-          echo "subuid range   : $(grep -E "^$(id -un):" /etc/subuid 2> /dev/null || echo "none: no --fakeroot uid mapping for $(id -un)")"
+          echo "subuid range   : ${subuid_range:-none: no --fakeroot uid mapping for $(id -un)}"
+          echo "proot          : $(command -v proot 2> /dev/null || echo "none")"
           echo "user namespaces: $(cat /proc/sys/user/max_user_namespaces 2> /dev/null || echo unknown) allowed"
           echo "setuid starter : $(grep -h -E '^allow setuid' /etc/apptainer/apptainer.conf /etc/singularity/singularity.conf 2> /dev/null | head -n 1 || echo unknown)"
           echo "proxy          : https_proxy=${https_proxy:-${HTTPS_PROXY:-unset}} no_proxy=${no_proxy:-${NO_PROXY:-unset}}"
@@ -203,15 +208,57 @@ jobs:
             while [ ! -e "${p}" ] && [ "${p}" != / ]; do p=$(dirname "${p}"); done
             echo "$(stat -f -c %T "${p}" 2> /dev/null || echo unknown), $(df -h "${p}" 2> /dev/null | awk 'NR == 2 {print $4}') free"
           }
+          f_mount_opts() {
+            findmnt -n -o OPTIONS --target "${1}" 2> /dev/null \
+              || awk -v p="$(df --output=target "${1}" 2> /dev/null | tail -n 1)" '$2 == p {print $4}' /proc/mounts 2> /dev/null
+          }
+          f_noexec() { case ",$(f_mount_opts "${1}")," in *,noexec,*) return 0 ;; *) return 1 ;; esac; }
+          f_network() { case "$(f_fs "${1}" | cut -d, -f1)" in nfs*|lustre*|gpfs*|panfs*|autofs*|fuse*|cifs*|smb*) return 0 ;; *) return 1 ;; esac; }
+          # the build scratch: the form's directory, else the first of TMPDIR, /tmp,
+          # /var/tmp and /dev/shm that is writable, not mounted noexec (Apptainer refuses
+          # it: FRAN's /tmp, 2026-10-21) and on a local filesystem (Apptainer's admin
+          # guide: a build with a subuid mapping cannot unpack on NFS, Lustre, GPFS or
+          # PanFS; Nautilus's home, 2026-10-21), else the best of them with a warning
+          candidates=""
+          for d in "${TMPDIR:-}" /tmp /var/tmp /dev/shm; do
+            [ -n "${d}" ] && [ -d "${d}" ] || continue
+            case " ${candidates} " in *" ${d} "*) continue ;; esac
+            candidates="${candidates} ${d}"
+          done
+          echo "scratch options:"
+          for d in ${candidates}; do
+            notes=""
+            [ -w "${d}" ] || notes="${notes}, not writable"
+            f_noexec "${d}" && notes="${notes}, noexec"
+            f_network "${d}" && notes="${notes}, network filesystem"
+            echo "  ${d}: $(f_fs "${d}")${notes}"
+          done
+          if [ -n "${build_tmp_dir:-}" ]; then
+            tmp_dir="${build_tmp_dir}"; tmp_why="the form"
+          else
+            tmp_dir=""
+            for d in ${candidates}; do
+              if [ -w "${d}" ] && ! f_noexec "${d}" && ! f_network "${d}"; then tmp_dir="${d}"; tmp_why="the first option that is writable, not noexec and local"; break; fi
+            done
+            if [ -z "${tmp_dir}" ]; then
+              for d in ${candidates}; do
+                if [ -w "${d}" ] && ! f_noexec "${d}"; then tmp_dir="${d}"; tmp_why="the first option that is writable and not noexec; none is local"; break; fi
+              done
+            fi
+            if [ -z "${tmp_dir}" ]; then
+              tmp_dir="${cache_dir}/tmp"; tmp_why="the cache directory: every option is unwritable or mounted noexec"
+            fi
+          fi
+          echo "export tmp_dir=\"${tmp_dir}\"" >> inputs.sh
           echo "image dir      : ${output_dir} ($(f_fs "${output_dir}"))"
           echo "cache dir      : ${cache_dir} ($(f_fs "${cache_dir}"))"
-          echo "build scratch  : ${tmp_dir} ($(f_fs "${tmp_dir}"))"
-          # Apptainer's admin guide: a build with a subuid mapping (--fakeroot) cannot
-          # unpack the image on NFS, Lustre, GPFS or PanFS (Nautilus's home, 2026-10-21)
-          case "$(f_fs "${tmp_dir}")" in
-            nfs*|lustre*|gpfs*|panfs*|autofs*|fuse*|cifs*|smb*)
-              echo "::warning title=Build scratch on a network filesystem::${tmp_dir} is on $(f_fs "${tmp_dir}" | cut -d, -f1): with a subuid mapping Apptainer cannot unpack an image there and the build fails with 'mkdir rootfs: no such file or directory'; set the build scratch directory to a local disk" ;;
-          esac
+          echo "build scratch  : ${tmp_dir} ($(f_fs "${tmp_dir}")), from ${tmp_why}"
+          if f_noexec "${tmp_dir}"; then
+            echo "::warning title=Build scratch mounted noexec::${tmp_dir} is mounted noexec and Apptainer refuses to unpack an image there; set the build scratch directory to a local filesystem mounted without noexec"
+          fi
+          if f_network "${tmp_dir}"; then
+            echo "::warning title=Build scratch on a network filesystem::${tmp_dir} is on $(f_fs "${tmp_dir}" | cut -d, -f1): with a subuid mapping Apptainer cannot unpack an image there and the build fails with 'mkdir rootfs: no such file or directory'; set the build scratch directory to a local disk"
+          fi
       - name: Write the Definition File
         run: |
           set -e
@@ -254,6 +301,17 @@ jobs:
           cmd=("${runtime_cmd}" build --force)
           if [ "${build_fakeroot}" = true ]; then
             cmd+=(--fakeroot)
+          elif [ "${runtime_flavor}" = singularity-ce ]; then
+            # SingularityCE refuses a definition file as a non-root user unless --fakeroot
+            # (a subuid range) or proot is there; Apptainer picks its own root emulation
+            if [ -n "${subuid_range}" ]; then
+              cmd+=(--fakeroot)
+              echo "::notice title=Root emulation::${runtime_version} builds with --fakeroot, added because the user has a subuid range (${subuid_range}) and SingularityCE has no root emulation of its own"
+            elif command -v proot > /dev/null 2>&1; then
+              echo "::notice title=Root emulation::${runtime_version} builds with proot ($(command -v proot)): no subuid range for $(id -un)"
+            else
+              echo "::warning title=Root emulation::${runtime_version} has neither a subuid range for $(id -un) nor proot on PATH: a definition file with a %post that acts as root will not build; ask the site for either"
+            fi
           fi
           # the form's extra options, split like a shell command line (quotes honoured)
           eval "extra=( $(cat build-options.txt) )"
@@ -283,6 +341,12 @@ jobs:
           if [ "${status}" != 0 ]; then
             if grep -q 'error unpacking rootfs' build.log; then
               echo "::error title=Build scratch::The build could not unpack the image under ${tmp_dir}: with a subuid mapping Apptainer cannot use a network filesystem (NFS, Lustre, GPFS, PanFS) as build scratch; set the build scratch directory to a local disk such as /tmp"
+            fi
+            if grep -q "'noexec' mount option" build.log; then
+              echo "::error title=Build scratch::${tmp_dir} is mounted noexec and ${runtime_name} refuses to unpack an image there; set the build scratch directory to a local filesystem mounted without noexec (the Prepare step lists the options it checked)"
+            fi
+            if grep -q 'required to build this source as a non-root user' build.log; then
+              echo "::error title=Root emulation::${runtime_version} builds a definition file as a non-root user only with --fakeroot (a subuid range for $(id -un): ${subuid_range:-none}) or the proot command on PATH; ask the site for either, or bootstrap from an image that needs no %post"
             fi
             echo "::error title=Error::${runtime_name} build exited with status ${status}; the tail of its output follows"
             tail -n 30 build.log
@@ -400,13 +464,16 @@ jobs:
           fakeroot:
             type: boolean
             label: Build with --fakeroot
-            description: Off lets the runtime choose; on asks for a user namespace mapped from the user's subuid range, which SingularityCE needs for a %post that installs packages.
+            description: Off lets Apptainer choose its root emulation and gives SingularityCE --fakeroot when the user has a subuid range; on always passes --fakeroot.
             default: false
             tooltip: |
               Apptainer builds unprivileged either way: it maps the user to root in a
               namespace, using the subuid range when the user has one, and that is
-              enough for pip, dnf and apt in most images. The Prepare step prints
-              the subuid range and the user namespace limit of the node.
+              enough for pip, dnf and apt in most images. SingularityCE refuses a
+              definition file as a non-root user without --fakeroot (a subuid range)
+              or proot on PATH, so with the box off the workflow adds --fakeroot for
+              it when the range exists. The Prepare step prints the subuid range,
+              proot and the user namespace limit of the node.
           timeout_min:
             type: number
             label: Build time limit
@@ -450,11 +517,13 @@ jobs:
             type: string
             label: Build scratch directory
             optional: true
-            description: Where the build unpacks the image; empty uses the node's TMPDIR or /tmp, which must have room for the uncompressed image.
+            description: Where the build unpacks the image; empty picks the first of TMPDIR, /tmp, /var/tmp and /dev/shm that is writable, not mounted noexec and on a local disk.
             tooltip: |
-              Set as APPTAINER_TMPDIR and SINGULARITY_TMPDIR. Keep it on a local
-              disk: with a subuid mapping (--fakeroot, which Apptainer uses on its
-              own when the user has one) a build cannot unpack on NFS, Lustre, GPFS
-              or PanFS, which is what a home or work directory usually is (Apptainer's
-              admin guide; seen on Nautilus, whose home is a network filesystem). Point
-              it at a larger local filesystem when /tmp is too small for the image.
+              Set as APPTAINER_TMPDIR and SINGULARITY_TMPDIR; it needs room for the
+              uncompressed image. Apptainer refuses a directory mounted noexec (FRAN's
+              /tmp), and with a subuid mapping (--fakeroot, which Apptainer uses on
+              its own when the user has one) a build cannot unpack on NFS, Lustre,
+              GPFS or PanFS, which is what a home or work directory usually is
+              (Apptainer's admin guide; Nautilus's home). The Prepare step lists the
+              options it checked and why it picked one; set this when none fits, or
+              when the image is too large for them.
