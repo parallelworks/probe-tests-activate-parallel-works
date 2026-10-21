@@ -1,0 +1,27 @@
+{
+  "name": "awssmall-rocky9-260928-login-1node-auto",
+  "platform": "activate.hpc.mil",
+  "user": "avidalto",
+  "workflow_name": "mpi-hello",
+  "workflow": {
+    "repo": "github.com/parallelworks/probe-tests-activate-parallel-works",
+    "path": "workflows/activate.hpc.mil/mpi-hello/yamls/hsp.yaml",
+    "ref": "hsp"
+  },
+  "timeout_s": 900,
+  "leftover_patterns": [
+    "mpi_hello",
+    "mpirun"
+  ],
+  "inputs": {
+    "resource": "pw://avidalto/awssmall",
+    "cluster": {
+      "scheduler": false,
+      "ntasks_per_node": 2
+    },
+    "mpi": {
+      "load": "",
+      "launcher": "mpirun -np"
+    }
+  }
+}
