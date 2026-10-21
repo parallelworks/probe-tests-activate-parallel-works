@@ -13,10 +13,6 @@
     "${HOME}/pw/software/containers/vllm.sif",
     "${HOME}/pw/models/Qwen2.5-0.5B-Instruct/config.json"
   ],
-  "leftover_patterns": [
-    "vllm.entrypoints",
-    "pw endpoints"
-  ],
   "inputs": {
     "resource": "pw://alvaro/awsgpu",
     "runtype": "vllm",

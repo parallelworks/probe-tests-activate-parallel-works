@@ -10,10 +10,6 @@
   },
   "timeout_s": 1800,
   "warm_marker": "${HOME}/pw/software/agent-venv",
-  "leftover_patterns": [
-    "agent_server",
-    "pw endpoints run"
-  ],
   "inputs": {
     "resource": "pw://alvaro/gcpsmall",
     "cluster": {

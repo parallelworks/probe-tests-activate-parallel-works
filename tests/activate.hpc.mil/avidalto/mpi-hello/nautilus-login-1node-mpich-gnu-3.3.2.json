@@ -9,10 +9,6 @@
     "ref": "hsp"
   },
   "timeout_s": 900,
-  "leftover_patterns": [
-    "mpi_hello",
-    "mpirun"
-  ],
   "inputs": {
     "resource": "pw://avidalto/nautilus",
     "cluster": {
