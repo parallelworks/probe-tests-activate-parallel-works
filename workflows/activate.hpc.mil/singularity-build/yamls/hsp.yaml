@@ -30,6 +30,7 @@ jobs:
           output_dir="${{ inputs.container.output_dir }}"
           build_fakeroot="${{ inputs.build.fakeroot }}"
           build_cache_dir="${{ inputs.build.cache_dir }}"
+          build_tmp_dir="${{ inputs.build.tmp_dir }}"
           build_timeout_min="${{ inputs.build.timeout_min }}"
           EOF
           # a hidden or empty input renders as nothing or undefined: drop those lines
@@ -50,7 +51,10 @@ jobs:
           build_timeout_min="${build_timeout_min:-60}"
           case "${output_dir}" in '~') output_dir="${HOME}" ;; '~/'*) output_dir="${HOME}/${output_dir#\~/}" ;; esac
           case "${build_cache_dir}" in '~') build_cache_dir="${HOME}" ;; '~/'*) build_cache_dir="${HOME}/${build_cache_dir#\~/}" ;; esac
+          case "${build_tmp_dir}" in '~') build_tmp_dir="${HOME}" ;; '~/'*) build_tmp_dir="${HOME}/${build_tmp_dir#\~/}" ;; esac
           cache_dir="${build_cache_dir:-${output_dir}/.cache}"
+          # the build unpacks the image here: the runtime's own default, a local disk
+          tmp_dir="${build_tmp_dir:-${TMPDIR:-/tmp}}"
           if ! [[ "${image_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
             echo "::error::The image file name must be letters, digits, dots, dashes and underscores, got '${image_name}'"
             exit 1
@@ -62,12 +66,14 @@ jobs:
           fi
           case "${output_dir}" in /*) ;; *) echo "::error::The image directory must be an absolute path, got '${output_dir}'"; exit 1 ;; esac
           case "${cache_dir}" in /*) ;; *) echo "::error::The cache directory must be an absolute path, got '${cache_dir}'"; exit 1 ;; esac
+          case "${tmp_dir}" in /*) ;; *) echo "::error::The build scratch directory must be an absolute path, got '${tmp_dir}'"; exit 1 ;; esac
           # the resolved values replace the raw form lines
-          sed -i '/^export \(image_name\|output_dir\|build_fakeroot\|build_cache_dir\|build_timeout_min\)=/d' inputs.sh
+          sed -i '/^export \(image_name\|output_dir\|build_fakeroot\|build_cache_dir\|build_tmp_dir\|build_timeout_min\)=/d' inputs.sh
           {
             echo "export image_name=\"${image_name}\""
             echo "export output_dir=\"${output_dir}\""
             echo "export cache_dir=\"${cache_dir}\""
+            echo "export tmp_dir=\"${tmp_dir}\""
             echo "export image=\"${output_dir}/${image_name}\""
             echo "export build_timeout_min=\"${build_timeout_min}\""
             echo "export build_fakeroot=\"${build_fakeroot:-false}\""
@@ -163,8 +169,21 @@ jobs:
           echo "setuid starter : $(grep -h -E '^allow setuid' /etc/apptainer/apptainer.conf /etc/singularity/singularity.conf 2> /dev/null | head -n 1 || echo unknown)"
           echo "proxy          : https_proxy=${https_proxy:-${HTTPS_PROXY:-unset}} no_proxy=${no_proxy:-${NO_PROXY:-unset}}"
           echo "HOME           : ${HOME}, WORKDIR: ${WORKDIR:-unset}, TMPDIR: ${TMPDIR:-unset}"
-          echo "image dir      : ${output_dir} ($(df -h "${output_dir}" 2> /dev/null | awk 'NR == 2 {print $4 " free on " $1}' || df -h "$(dirname "${output_dir}")" 2> /dev/null | awk 'NR == 2 {print $4 " free on " $1 " (parent)"}'))"
-          echo "cache dir      : ${cache_dir}"
+          # the filesystem of a directory that may not exist yet: its first existing parent
+          f_fs() {
+            local p="${1}"
+            while [ ! -e "${p}" ] && [ "${p}" != / ]; do p=$(dirname "${p}"); done
+            echo "$(stat -f -c %T "${p}" 2> /dev/null || echo unknown), $(df -h "${p}" 2> /dev/null | awk 'NR == 2 {print $4}') free"
+          }
+          echo "image dir      : ${output_dir} ($(f_fs "${output_dir}"))"
+          echo "cache dir      : ${cache_dir} ($(f_fs "${cache_dir}"))"
+          echo "build scratch  : ${tmp_dir} ($(f_fs "${tmp_dir}"))"
+          # Apptainer's admin guide: a build with a subuid mapping (--fakeroot) cannot
+          # unpack the image on NFS, Lustre, GPFS or PanFS (Nautilus's home, 2026-10-21)
+          case "$(f_fs "${tmp_dir}")" in
+            nfs*|lustre*|gpfs*|panfs*|autofs*|fuse*|cifs*|smb*)
+              echo "::warning title=Build scratch on a network filesystem::${tmp_dir} is on $(f_fs "${tmp_dir}" | cut -d, -f1): with a subuid mapping Apptainer cannot unpack an image there and the build fails with 'mkdir rootfs: no such file or directory'; set the build scratch directory to a local disk" ;;
+          esac
       - name: Write the Definition File
         run: |
           set -e
@@ -185,19 +204,19 @@ jobs:
           cat container.def
       # the image is built under a temporary name in its own directory and renamed
       # once complete, so a failed or cancelled build never leaves a half-written
-      # file under the final name; the runtime's layer cache and build scratch go
-      # under cache_dir, not /tmp, which login nodes keep small
+      # file under the final name; the layer cache goes under cache_dir (a shared
+      # filesystem is fine) and the unpacking under tmp_dir, a local disk
       - name: Build the Image
         run: |
           set -o pipefail
           source inputs.sh
           source runtime-env.sh
-          if ! mkdir -p "${output_dir}" "${cache_dir}/tmp" 2> /dev/null || ! [ -w "${output_dir}" ] || ! [ -w "${cache_dir}/tmp" ]; then
-            echo "::error title=Error::Cannot create or write ${output_dir} and ${cache_dir}/tmp: choose a directory of yours in the form"
+          if ! mkdir -p "${output_dir}" "${cache_dir}" "${tmp_dir}" 2> /dev/null || ! [ -w "${output_dir}" ] || ! [ -w "${cache_dir}" ] || ! [ -w "${tmp_dir}" ]; then
+            echo "::error title=Error::Cannot create or write ${output_dir}, ${cache_dir} and ${tmp_dir}: choose directories of yours in the form"
             exit 1
           fi
           export APPTAINER_CACHEDIR="${cache_dir}" SINGULARITY_CACHEDIR="${cache_dir}"
-          export APPTAINER_TMPDIR="${cache_dir}/tmp" SINGULARITY_TMPDIR="${cache_dir}/tmp"
+          export APPTAINER_TMPDIR="${tmp_dir}" SINGULARITY_TMPDIR="${tmp_dir}"
           partial="${output_dir}/.${image_name}.${PW_RUN_SLUG}.partial"
           trap 'rm -f "${partial}"' EXIT
           trap 'exit 129' HUP
@@ -215,6 +234,7 @@ jobs:
           echo "Runtime  : ${runtime_version}"
           echo "Image    : ${image}"
           echo "Cache    : ${cache_dir}"
+          echo "Scratch  : ${tmp_dir}"
           echo "Command  : ${cmd[*]}"
           echo "Limit    : ${build_timeout_min} minutes"
           echo "Started  : $(date)"
@@ -233,6 +253,9 @@ jobs:
             exit 1
           fi
           if [ "${status}" != 0 ]; then
+            if grep -q 'error unpacking rootfs' build.log; then
+              echo "::error title=Build scratch::The build could not unpack the image under ${tmp_dir}: with a subuid mapping Apptainer cannot use a network filesystem (NFS, Lustre, GPFS, PanFS) as build scratch; set the build scratch directory to a local disk such as /tmp"
+            fi
             echo "::error title=Error::${runtime_name} build exited with status ${status}; the tail of its output follows"
             tail -n 30 build.log
             exit 1
@@ -390,9 +413,20 @@ jobs:
             type: string
             label: Cache directory
             optional: true
-            description: Holds the layer cache and the build scratch; empty puts it at .cache under the image directory.
+            description: Holds the downloaded image layers; empty puts it at .cache under the image directory.
             tooltip: |
-              Set as APPTAINER_CACHEDIR and SINGULARITY_CACHEDIR, with tmp under it
-              as the build's TMPDIR: a build unpacks the whole image there, and /tmp
-              on a login node is often too small. A warm cache makes a rebuild from
-              the same base image a matter of seconds.
+              Set as APPTAINER_CACHEDIR and SINGULARITY_CACHEDIR. A shared filesystem
+              is fine here, and a warm cache makes a rebuild from the same base image
+              a matter of seconds.
+          tmp_dir:
+            type: string
+            label: Build scratch directory
+            optional: true
+            description: Where the build unpacks the image; empty uses the node's TMPDIR or /tmp, which must have room for the uncompressed image.
+            tooltip: |
+              Set as APPTAINER_TMPDIR and SINGULARITY_TMPDIR. Keep it on a local
+              disk: with a subuid mapping (--fakeroot, which Apptainer uses on its
+              own when the user has one) a build cannot unpack on NFS, Lustre, GPFS
+              or PanFS, which is what a home or work directory usually is (Apptainer's
+              admin guide; seen on Nautilus, whose home is a network filesystem). Point
+              it at a larger local filesystem when /tmp is too small for the image.

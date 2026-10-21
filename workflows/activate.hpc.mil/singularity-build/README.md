@@ -3,9 +3,9 @@
 Builds a Singularity image (`.sif`) from a definition file on the login node of a
 cluster, the way an HPC user builds the container a job will run: the definition
 pasted in the form is written to the job directory, the runtime (Apptainer or
-SingularityCE) is located, `build` runs with the layer cache and scratch under a
-directory of the user's choosing, and a command is run inside the finished image to
-prove it mounts and runs on that node. The run completes with the image's path and
+SingularityCE) is located, `build` runs with the layer cache under a directory of
+the user's choosing and its scratch on the node's local disk, and a command is run
+inside the finished image to prove it mounts and runs on that node. The run completes with the image's path and
 fails loud at the first missing piece: no runtime, a registry the login node cannot
 reach, a `%post` that fails, a `%test` that fails, an image that does not run. Nothing
 is submitted to the scheduler, no endpoint is registered, and nothing is left behind
@@ -41,13 +41,15 @@ One job, `build`, on the login node:
    when a fresh shell that sources the file has no runtime. Then prints what an
    unprivileged build depends on: the runtime version, the user's `subuid` range,
    the user namespace limit, the `allow setuid` setting, the proxy variables, `HOME`,
-   `WORKDIR` and `TMPDIR`, and the free space of the image directory.
+   `WORKDIR` and `TMPDIR`, and the filesystem and free space of the image, cache and
+   scratch directories, with a warning when the scratch is on a network filesystem
+   (Root emulation, below).
 3. **Write the Definition File**: `container.def` from the form; fails when it is
    empty or has no `Bootstrap:` line.
 4. **Build the Image**: `<runtime> build --force [--fakeroot] [options] <partial>
    container.def` under `timeout`, with `APPTAINER_CACHEDIR`/`SINGULARITY_CACHEDIR`
-   set to the cache directory and the build's `TMPDIR` to `tmp` under it (login nodes
-   keep `/tmp` small). The image is built under a temporary name
+   set to the cache directory and `APPTAINER_TMPDIR`/`SINGULARITY_TMPDIR` to the
+   build scratch directory. The image is built under a temporary name
    (`.<image>.<run slug>.partial`) in the image directory and renamed once complete,
    so a failed or cancelled build never leaves a half-written file under the final
    name; the trap removes the temporary file. The `%test` section of the definition
@@ -71,7 +73,8 @@ One job, `build`, on the login node:
 | Build time limit | Minutes; the build is killed and the run fails when it is exceeded. Default 60. |
 | Extra build options | Appended to the build command: `--notest`, `--disable-cache`, Apptainer's `--ignore-subuid --ignore-fakeroot-command` (no root emulation at all). |
 | Environment commands | Empty takes the runtime on PATH, else the first known module; otherwise the commands that provide one or set a proxy, one per line, run before every step. |
-| Cache directory | Layer cache and build scratch. Empty: `.cache` under the image directory. |
+| Cache directory | The downloaded image layers. Empty: `.cache` under the image directory; a shared filesystem is fine. |
+| Build scratch directory | Where the build unpacks the image, a local disk with room for the uncompressed image. Empty: the node's `TMPDIR` or `/tmp`. |
 
 ## Root emulation
 
@@ -88,6 +91,14 @@ image's root filesystem, and the runtimes differ:
   `%post` that acts as root, or `proot` on PATH (4.1 and later) for a rootless build.
   The Prepare step prints the `subuid` range so a `--fakeroot` failure can be read
   against it.
+- **With a `subuid` mapping the build scratch must be a local disk.** Apptainer's
+  admin guide says a `--fakeroot` build cannot use NFS, Lustre, GPFS or PanFS as
+  `TMPDIR`, and the failure is `packer failed to pack: while unpacking tmpfs: error
+  unpacking rootfs: mkdir rootfs: ... no such file or directory` right after the
+  layers were copied (Nautilus, 2026-10-21, with the scratch under the home
+  directory). The layer cache has no such restriction. That is why the scratch
+  defaults to the node's `TMPDIR` or `/tmp`, Apptainer's own default, and is a
+  separate input from the cache.
 
 ## Other systems
 
@@ -97,7 +108,7 @@ environment commands, or from PATH and the known modules when they are left empt
 | System | Runtime | Environment commands | Verified |
 |---|---|---|---|
 | gcpsmall (Google cluster of activate.parallel.works) | Apptainer 1.4.5 on PATH, `subuid` configured, no proxy | empty | 2026-10-21, all three test definitions |
-| Nautilus (Navy DSRC) | to be recorded from the first run | | |
+| Nautilus (Navy DSRC) | Apptainer 1.3.6 on PATH, `subuid` mapping, reaches Docker Hub; home is a network filesystem, so the build scratch must stay on the local disk (the default) | empty | first run 2026-10-21 failed on the scratch under home; rerun pending |
 | FRAN (ARL DSRC) | to be recorded from the first run | | |
 | awssmall (AWS cluster of activate.hpc.mil) | to be recorded from the first run | | |
 
@@ -120,7 +131,8 @@ an inputs JSON. The `inputs` object of a PROBE definition is one; the shape is:
     "timeout_min": 30,
     "options": "",
     "environment": "",
-    "cache_dir": ""
+    "cache_dir": "",
+    "tmp_dir": ""
   }
 }
 ```
@@ -150,9 +162,9 @@ test-command.txt   the test command, test.out its output
 logs/build/step_N/step.out   the step traces (::error lines say why a run failed)
 ```
 
-The image is at `<image directory>/<image file name>`, the cache at
-`<cache directory>` (`cache/` holds the OCI layers, `tmp/` the build scratch, empty
-after a build). From anywhere: `pw workflows runs errors <slug>` and
+The image is at `<image directory>/<image file name>`, the layers at
+`<cache directory>/cache/`; the build scratch (`build-temp-*` under the scratch
+directory) is removed when the build ends. From anywhere: `pw workflows runs errors <slug>` and
 `pw workflows runs logs <slug>`.
 
 ## Troubleshooting
@@ -177,9 +189,13 @@ working alternative is a second test, not a change to the first.
   With Apptainer, try the box off (its own cascade) or
   `--ignore-subuid --ignore-fakeroot-command` in the options; with SingularityCE ask
   the site for a `subuid` range, or install `proot`.
-- **`No space left on device` during the build**: the cache directory's filesystem is
-  full (the build unpacks the whole image under `tmp/`). Set the cache directory, or
-  the image directory it defaults under, to a filesystem with room.
+- **`error unpacking rootfs: mkdir rootfs: ... no such file or directory`** right
+  after the layers were copied: the build scratch is on a network filesystem and the
+  build runs with a `subuid` mapping (Root emulation, above). The Prepare step warns
+  about it before the build. Set the build scratch directory to a local disk.
+- **`No space left on device` during the build**: the scratch filesystem is full (the
+  build unpacks the whole image there). Set the build scratch directory to a larger
+  local filesystem; the cache directory holds the compressed layers and can stay.
 - **`failed to execute %test script`**: the definition's own test failed inside the
   build, so the image was not written. Fix the definition, or pass `--notest` to
   look at the image anyway.

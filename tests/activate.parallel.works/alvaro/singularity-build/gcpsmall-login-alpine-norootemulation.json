@@ -23,7 +23,8 @@
       "timeout_min": 30,
       "options": "--ignore-subuid --ignore-fakeroot-command",
       "environment": "",
-      "cache_dir": ""
+      "cache_dir": "",
+      "tmp_dir": ""
     }
   }
 }
