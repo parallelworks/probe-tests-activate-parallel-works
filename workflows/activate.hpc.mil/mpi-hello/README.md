@@ -65,7 +65,8 @@ left empty, and the launcher from its input.
 |---|---|---|
 | Nautilus (Navy DSRC) | MPICH 3.3.2, `mpich/gnu/3.3.2` (also `mpich/intel`, `mpich/aocc`) | `module load mpich/gnu/3.3.2`, or empty (`mpich/gnu` is a known module) |
 | FRAN | Intel MPI 2021.14, `mpi/2021.14` and `mpi/latest` | `module load mpi/latest`, or empty |
-| awshpc, gcpsmall (cloud clusters of activate.parallel.works) | MPICH 4.1.1 as `mpi/mpich-x86_64`, Open MPI as `mpi/openmpi-x86_64` | `module load mpi/mpich-x86_64`, or empty |
+| awshpc (AWS cluster of activate.parallel.works) | Amazon Open MPI on PATH (`/opt/amazon/openmpi`); MPICH 4.1.1 as `mpi/mpich-x86_64` | empty (takes the Open MPI on PATH), or `module load mpi/mpich-x86_64` |
+| gcpsmall (Google cluster of activate.parallel.works) | Open MPI 4.1 as `mpi/openmpi-x86_64`, MPICH as `mpi/mpich-x86_64` | `module load mpi/openmpi-x86_64`, or empty |
 
 MPICH's and Intel MPI's `mpirun` (Hydra) and Open MPI's all read the SLURM or PBS
 allocation, so `mpirun -np` is the default launcher everywhere; `srun --mpi=pmi2 -n`
@@ -151,12 +152,14 @@ launch). The same inputs, as PROBE definitions, are
 `nautilus-login.json` at the root of this repository; they point `workflow.repo` at
 this repository and `workflow.ref` at the `hsp` branch.
 
-`tests/hsp/awshpc-login.json` (the environment commands left empty, so the known
-module `mpi/mpich-x86_64` is found) and `tests/hsp/awshpc-compute.json` (two cloud
-nodes, `module load mpi/mpich-x86_64`) run the same workflow on `pw://alvaro/awshpc`
-of activate.parallel.works; their PROBE definitions are under
+`tests/hsp/awshpc-login.json` (the environment commands left empty: the Amazon
+Open MPI already on PATH is used) and `tests/hsp/awshpc-compute.json` (two cloud
+nodes, `module load mpi/mpich-x86_64`, MPICH 4.1.1) run the same workflow on
+`pw://alvaro/awshpc` of activate.parallel.works; their PROBE definitions are under
 `tests/activate.parallel.works/alvaro/mpi-hello/`. They are how the workflow is tested
-end to end before a run on HSP, from a `parallelworks/workflows` checkout:
+end to end before a run on HSP, from a `parallelworks/workflows` checkout, and both
+passed on 2026-10-21 (runs `fancy-platypus`, 40 s, and `national-slug`, 291 s with the
+cloud nodes' boot; two ranks on each of two nodes, Allreduce correct, no leftovers):
 
 ```bash
 cd workflows/probe/app
