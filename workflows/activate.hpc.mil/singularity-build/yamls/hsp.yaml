@@ -83,9 +83,12 @@ jobs:
           echo "--- build options: $(cat build-options.txt)"
           echo "JOB_DIR=${PWD}" | tee -a $OUTPUTS
       # one file every later step sources: module initialized for a non-login shell,
-      # then the form's commands, or the first known module when none were given and
-      # no runtime is on PATH. Checked in a fresh shell, so a missing runtime fails
-      # the run before any download
+      # then the form's commands, or, when none were given and no runtime is on the
+      # step's PATH, the directory that has one: a step's PATH is shorter than a login
+      # shell's (FRAN keeps apptainer in /opt/apptainer/bin, awssmall singularity in
+      # /usr/local/bin, both added by the login profile), so the usual directories are
+      # tried, then what the user's login shell finds, then the known modules. Checked
+      # in a fresh shell, so a missing runtime fails the run before any download
       - name: Prepare the Container Runtime
         run: |
           set -e
@@ -136,7 +139,31 @@ jobs:
             found=""
             if out=$(f_provides true); then
               found="the runtime already on PATH"
-            else
+            fi
+            if [ -z "${found}" ]; then
+              for d in /usr/local/bin /opt/apptainer/bin /opt/singularity/bin /usr/local/apptainer/bin /usr/local/singularity/bin; do
+                if [ -x "${d}/apptainer" ] || [ -x "${d}/singularity" ]; then
+                  echo "export PATH=\"${d}:\${PATH}\"" >> runtime-env.sh
+                  if out=$(f_provides true); then
+                    found="the directory ${d}, which a step's PATH lacks"
+                    break
+                  fi
+                fi
+              done
+            fi
+            if [ -z "${found}" ]; then
+              # a login shell runs the site's profile; only a line that is a path to the
+              # runtime counts, whatever else the profile prints
+              login_cmd=$(bash -lc 'command -v apptainer 2> /dev/null || command -v singularity 2> /dev/null' 2> /dev/null \
+                | grep -E '^/[^[:space:]]+/(apptainer|singularity)$' | head -n 1)
+              if [ -n "${login_cmd}" ] && [ -x "${login_cmd}" ]; then
+                echo "export PATH=\"$(dirname "${login_cmd}"):\${PATH}\"" >> runtime-env.sh
+                if out=$(f_provides true); then
+                  found="the login shell's PATH (${login_cmd}), which a step's PATH lacks"
+                fi
+              fi
+            fi
+            if [ -z "${found}" ]; then
               for mod in apptainer singularity singularity-ce; do
                 if out=$(f_provides "module load ${mod} > /dev/null 2>&1"); then
                   echo "module load ${mod}" >> runtime-env.sh
@@ -146,7 +173,7 @@ jobs:
               done
             fi
             if [ -z "${found}" ]; then
-              echo "::error title=Error::No container runtime found: nothing on PATH provides apptainer or singularity, and none of the modules apptainer, singularity and singularity-ce loads; give the environment commands in the form (for example module load singularity)"
+              echo "::error title=Error::No container runtime found: nothing on the step's PATH (${PATH}), in /usr/local/bin, /opt/apptainer/bin, /opt/singularity/bin, /usr/local/apptainer/bin or /usr/local/singularity/bin, on a login shell's PATH, or in the modules apptainer, singularity and singularity-ce provides apptainer or singularity; give the environment commands in the form (for example module load singularity, or export PATH=/path/to/bin:\${PATH})"
               exit 1
             fi
           fi
@@ -169,6 +196,7 @@ jobs:
           echo "setuid starter : $(grep -h -E '^allow setuid' /etc/apptainer/apptainer.conf /etc/singularity/singularity.conf 2> /dev/null | head -n 1 || echo unknown)"
           echo "proxy          : https_proxy=${https_proxy:-${HTTPS_PROXY:-unset}} no_proxy=${no_proxy:-${NO_PROXY:-unset}}"
           echo "HOME           : ${HOME}, WORKDIR: ${WORKDIR:-unset}, TMPDIR: ${TMPDIR:-unset}"
+          echo "step PATH      : ${PATH}"
           # the filesystem of a directory that may not exist yet: its first existing parent
           f_fs() {
             local p="${1}"

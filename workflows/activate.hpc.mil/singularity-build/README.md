@@ -36,9 +36,15 @@ One job, `build`, on the login node:
 2. **Prepare the Container Runtime**: writes `runtime-env.sh` (`module` initialized
    first, the HPCMP directories `/p/app/modulefiles` and `/p/app/site/modulefiles`
    added when they exist) from the form's environment commands, or, when they are
-   empty, from the `apptainer` or `singularity` already on PATH or the first of the
-   modules `apptainer`, `singularity` and `singularity-ce` that loads. Fails the run
-   when a fresh shell that sources the file has no runtime. Then prints what an
+   empty, from the `apptainer` or `singularity` already on the step's PATH, else the
+   first of `/usr/local/bin`, `/opt/apptainer/bin`, `/opt/singularity/bin`,
+   `/usr/local/apptainer/bin` and `/usr/local/singularity/bin` that holds one, else
+   the one the user's login shell finds (`bash -lc 'command -v apptainer'`, a path
+   taken from whatever else the profile prints), else the first of the modules
+   `apptainer`, `singularity` and `singularity-ce` that loads; a directory found this
+   way is prepended to PATH in the file. A workflow step's PATH is shorter than a
+   login shell's, and that is where FRAN and awssmall keep their runtime. Fails the
+   run when a fresh shell that sources the file has no runtime. Then prints what an
    unprivileged build depends on: the runtime version, the user's `subuid` range,
    the user namespace limit, the `allow setuid` setting, the proxy variables, `HOME`,
    `WORKDIR` and `TMPDIR`, and the filesystem and free space of the image, cache and
@@ -72,7 +78,7 @@ One job, `build`, on the login node:
 | Build with --fakeroot | Off lets the runtime choose how to emulate root in `%post`; on passes `--fakeroot`, which maps the user's `subuid` range and is what SingularityCE needs for a `%post` that installs packages. |
 | Build time limit | Minutes; the build is killed and the run fails when it is exceeded. Default 60. |
 | Extra build options | Appended to the build command: `--notest`, `--disable-cache`, Apptainer's `--ignore-subuid --ignore-fakeroot-command` (no root emulation at all). |
-| Environment commands | Empty takes the runtime on PATH, else the first known module; otherwise the commands that provide one or set a proxy, one per line, run before every step. |
+| Environment commands | Empty finds the runtime itself (the step's PATH, the usual install directories, the login shell's PATH, the known modules); otherwise the commands that provide one or set a proxy, one per line, run before every step. |
 | Cache directory | The downloaded image layers. Empty: `.cache` under the image directory; a shared filesystem is fine. |
 | Build scratch directory | Where the build unpacks the image, a local disk with room for the uncompressed image. Empty: the node's `TMPDIR` or `/tmp`. |
 
@@ -109,8 +115,8 @@ environment commands, or from PATH and the known modules when they are left empt
 |---|---|---|---|
 | gcpsmall (Google cluster of activate.parallel.works) | Apptainer 1.4.5 on PATH, `subuid` configured, no proxy | empty | 2026-10-21, all three test definitions |
 | Nautilus (Navy DSRC) | Apptainer 1.3.6 on PATH, `subuid` mapping, reaches Docker Hub; home is a network filesystem, so the build scratch must stay on the local disk (the default) | empty | 2026-10-21, `python-numpy-auto` and `rocky9-mpich-fakeroot`, by hand on the platform |
-| FRAN (ARL DSRC) | to be recorded from the first run | | |
-| awssmall (AWS cluster of activate.hpc.mil) | to be recorded from the first run | | |
+| FRAN (ARL DSRC) | Apptainer in `/opt/apptainer/bin` (`singularity` is its alias there), added to PATH by the login profile only | empty | first run 2026-10-21 found no runtime (the step's PATH lacks the directory; fixed); rerun pending |
+| awssmall (AWS cluster of activate.hpc.mil) | `singularity` in `/usr/local/bin`, which the step's PATH lacks | empty | first run 2026-10-21 found no runtime (fixed); rerun pending |
 
 ## Running it
 
@@ -173,11 +179,15 @@ A failing run is first of all a finding about the cluster, which is what a PROBE
 is for: a test keeps the definition and options its inputs were submitted with, and a
 working alternative is a second test, not a change to the first.
 
-- **`No container runtime found`** in Prepare: nothing on PATH and none of the known
-  modules loads in a workflow step. Put the site's command in the environment
-  commands (`module load singularity/<version>`; `module avail singularity` in a
-  login shell lists the name). A module directory a login-only profile adds goes in
-  as `module use <directory>` before the `module load`.
+- **`No container runtime found`** in Prepare: nothing on the step's PATH (printed
+  in the report), in the usual install directories, on a login shell's PATH, or in
+  the known modules. `which apptainer` in a login shell says where the site keeps
+  it; put that in the environment commands as `export PATH=<directory>:${PATH}`,
+  or the site's `module load singularity/<version>` (`module avail singularity`
+  lists the name). A module directory a login-only profile adds goes in as
+  `module use <directory>` before the `module load`. FRAN and awssmall (2026-10-21)
+  were this case before the login-shell lookup existed: their runtime sits in a
+  directory only the login profile adds.
 - **`Fetching OCI image` fails, or the build sits there until the time limit**: the
   login node does not reach the registry. On a system that reaches the internet
   through a proxy, export it in the environment commands (`export
