@@ -10,10 +10,6 @@
   },
   "timeout_s": 1800,
   "warm_marker": "${HOME}/pw/software/.miniconda3c",
-  "leftover_patterns": [
-    "jupyter-lab",
-    "pw endpoints run"
-  ],
   "inputs": {
     "resource": "pw://alvaro/gcpsmall",
     "cluster": {

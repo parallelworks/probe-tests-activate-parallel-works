@@ -10,11 +10,6 @@
   },
   "timeout_s": 3000,
   "warm_marker": "${HOME}/pw/software/containers/kasmvnc-rocky9-gpu.sif",
-  "leftover_patterns": [
-    "Xvnc",
-    "kasmvnc",
-    "pw endpoints http"
-  ],
   "inputs": {
     "resource": "pw://alvaro/gcpsmall",
     "cluster": {

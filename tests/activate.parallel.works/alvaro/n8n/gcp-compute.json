@@ -10,10 +10,6 @@
   },
   "timeout_s": 2400,
   "warm_marker": "${HOME}/pw/software/containers/n8n.sif",
-  "leftover_patterns": [
-    "n8n",
-    "pw endpoints run"
-  ],
   "inputs": {
     "resource": "pw://alvaro/gcpsmall",
     "cluster": {

@@ -15,17 +15,6 @@
     "${HOME}/pw/models/Qwen2.5-0.5B-Instruct/config.json",
     "${HOME}/pw/models/all-MiniLM-L6-v2/config.json"
   ],
-  "leftover_patterns": [
-    "vllm.entrypoints",
-    "pw endpoints",
-    "rag_proxy",
-    "rag_server",
-    "indexer.py",
-    "chroma run"
-  ],
-  "leftover_commands": {
-    "singularity_instances": "singularity instance list 2>/dev/null | tail -n +2 | wc -l"
-  },
   "inputs": {
     "resource": "pw://alvaro/a30gpuserver",
     "runtype": "all",

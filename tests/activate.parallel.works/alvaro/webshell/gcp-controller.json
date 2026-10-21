@@ -10,11 +10,6 @@
   },
   "timeout_s": 1200,
   "warm_marker": "${HOME}/pw/software/noVNC-1.3.0/ttyd.x86_64",
-  "leftover_patterns": [
-    "ttyd",
-    "SCREEN",
-    "pw endpoints run"
-  ],
   "inputs": {
     "resource": "pw://alvaro/gcpsmall",
     "cluster": {

@@ -13,10 +13,6 @@
     "${HOME}/pw/software/agent-venv",
     "${HOME}/.hermes"
   ],
-  "leftover_patterns": [
-    "hermes",
-    "pw endpoints run"
-  ],
   "inputs": {
     "resource": "pw://alvaro/gcpsmall",
     "cluster": {

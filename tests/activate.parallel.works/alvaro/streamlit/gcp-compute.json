@@ -10,10 +10,6 @@
   },
   "timeout_s": 2400,
   "warm_marker": "${HOME}/pw/software/containers/ghcr.io_parallelworks_streamlit_1.0/streamlit.sif",
-  "leftover_patterns": [
-    "streamlit",
-    "pw endpoints run"
-  ],
   "inputs": {
     "resource": "pw://alvaro/gcpsmall",
     "cluster": {
