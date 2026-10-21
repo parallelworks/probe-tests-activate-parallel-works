@@ -8,7 +8,8 @@
 #
 # Options (the defaults match ../tests/hsp/nautilus-compute.json):
 #   --account ACCT    SLURM account (--account); the job is submitted only when given
-#   --qos QOS         --qos (default standard)
+#   --qos QOS         --qos (default standard; '' for none)
+#   --partition P     --partition (default general; '' for the cluster's default)
 #   --constraint C    --constraint (default standard; '' for none)
 #   --nodes N         --nodes (default 2)
 #   --ppn M           --ntasks-per-node, and the rank count on the login node (default 2)
@@ -21,23 +22,26 @@ set -o pipefail
 
 ACCOUNT=""
 QOS="standard"
+PARTITION="general"
 CONSTRAINT="standard"
 NODES=2
 PPN=2
 TIME="00:10:00"
 WAIT_MIN=20
 MPI_MODULE="mpich/gnu/3.3.2"
+need() { [ $# -ge 2 ] || { echo "missing value for $1 (see --help)"; exit 2; }; }
 while [ $# -gt 0 ]; do
     case "$1" in
-        --account)    ACCOUNT="$2"; shift 2 ;;
-        --qos)        QOS="$2"; shift 2 ;;
-        --constraint) CONSTRAINT="$2"; shift 2 ;;
-        --nodes)      NODES="$2"; shift 2 ;;
-        --ppn)        PPN="$2"; shift 2 ;;
-        --time)       TIME="$2"; shift 2 ;;
-        --wait)       WAIT_MIN="$2"; shift 2 ;;
-        --module)     MPI_MODULE="$2"; shift 2 ;;
-        -h|--help)    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --account)    need "$@"; ACCOUNT="$2"; shift 2 ;;
+        --qos)        need "$@"; QOS="$2"; shift 2 ;;
+        --partition)  need "$@"; PARTITION="$2"; shift 2 ;;
+        --constraint) need "$@"; CONSTRAINT="$2"; shift 2 ;;
+        --nodes)      need "$@"; NODES="$2"; shift 2 ;;
+        --ppn)        need "$@"; PPN="$2"; shift 2 ;;
+        --time)       need "$@"; TIME="$2"; shift 2 ;;
+        --wait)       need "$@"; WAIT_MIN="$2"; shift 2 ;;
+        --module)     need "$@"; MPI_MODULE="$2"; shift 2 ;;
+        -h|--help)    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1 (see --help)"; exit 2 ;;
     esac
 done
@@ -47,7 +51,7 @@ section() { echo; echo "===== $* ====="; }
 show() {
     local t="$1"; shift
     echo "\$ $*"
-    timeout "${t}" bash -c "$*" 2>&1 || echo "(exit $?)"
+    timeout -k 10 "${t}" bash -c "$*" 2>&1 || echo "(exit $?)"
 }
 
 section "1. System ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
@@ -59,11 +63,14 @@ show 20 'curl -sS -m 10 -o /dev/null -w "github.com HTTP %{http_code}\n" https:/
 show 10 'df -h "$HOME" | tail -n 1'
 
 section "2. Modules"
+echo "MODULESHOME=${MODULESHOME:-unset} LMOD_PKG=${LMOD_PKG:-unset} module: $(type -t module 2>/dev/null || echo undefined)"
+ls /etc/profile.d/*modules* /etc/profile.d/*lmod* 2>/dev/null
 # the initialization the workflow does in a non-login shell before the form's commands
 if command -v module > /dev/null 2>&1; then
     echo "module is already defined in this shell"
 else
-    for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh \
+    for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /etc/profile.d/z00_lmod.sh \
+             "${MODULESHOME:-/nonexistent}/init/bash" "${LMOD_PKG:-/nonexistent}/init/bash" \
              /usr/share/lmod/lmod/init/bash /usr/share/Modules/init/bash; do
         if [ -r "${f}" ]; then
             echo "module initialized from ${f}"
@@ -80,9 +87,9 @@ echo "\$ module avail mpi"; module avail mpi 2>&1
 echo "\$ module show ${MPI_MODULE}"; module show "${MPI_MODULE}" 2>&1 | head -n 40
 
 section "3. SLURM"
-show 20 'sinfo -s'
+show 20 'sinfo -V; sinfo -s'
 show 20 'sinfo -o "%P %a %l %D %t %f" | head -n 30'
-show 20 'scontrol show config | grep -i -E "^(ClusterName|SelectType|MpiDefault|MpiParams|KillWait|SchedulerType|PrologFlags)"'
+show 20 'scontrol show config | grep -i -E "^(ClusterName|SLURM_VERSION|SelectType|MpiDefault|MpiParams|KillWait|SchedulerType|PrologFlags)"'
 show 20 "sacctmgr show assoc where user=${USER} format=cluster,account,partition,qos,defaultqos,maxjobs -P"
 show 20 'sacctmgr show qos format=name,maxwall,maxtrespu,maxjobspu,priority,flags -P'
 show 20 "squeue -u ${USER}"
@@ -141,7 +148,6 @@ cat > job.sh <<EOF
 #!/bin/bash
 #SBATCH --job-name=mpi-hello-check
 #SBATCH --account=${ACCOUNT}
-#SBATCH --qos=${QOS}
 #SBATCH --cpus-per-task=1
 #SBATCH --nodes=${NODES}
 #SBATCH --ntasks-per-node=${PPN}
@@ -150,6 +156,13 @@ cat > job.sh <<EOF
 #SBATCH -o ${dir}/job.%j.out
 #SBATCH -e ${dir}/job.%j.out
 EOF
+# the same optional headers the hsp script submitter writes, in the same order
+if [ -n "${PARTITION}" ]; then
+    echo "#SBATCH --partition=${PARTITION}" >> job.sh
+fi
+if [ -n "${QOS}" ]; then
+    echo "#SBATCH --qos=${QOS}" >> job.sh
+fi
 if [ -n "${CONSTRAINT}" ]; then
     echo "#SBATCH --constraint=${CONSTRAINT}" >> job.sh
 fi
@@ -157,7 +170,8 @@ echo "MPI_MODULE=${MPI_MODULE}" >> job.sh
 cat >> job.sh <<'EOF'
 set -o pipefail
 if ! command -v module > /dev/null 2>&1; then
-    for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh \
+    for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /etc/profile.d/z00_lmod.sh \
+             "${MODULESHOME:-/nonexistent}/init/bash" "${LMOD_PKG:-/nonexistent}/init/bash" \
              /usr/share/lmod/lmod/init/bash /usr/share/Modules/init/bash; do
         if [ -r "${f}" ]; then
             source "${f}"
@@ -166,15 +180,17 @@ if ! command -v module > /dev/null 2>&1; then
     done
 fi
 module load "${MPI_MODULE}"
-echo "node $(hostname), SLURM job ${SLURM_JOB_ID} on ${SLURM_JOB_NODELIST}: ${SLURM_NTASKS} tasks on ${SLURM_JOB_NUM_NODES} nodes"
+# the workflow's own arithmetic: SLURM_NTASKS may be unset when only --ntasks-per-node was given
+ntasks="${SLURM_NTASKS:-$(( SLURM_JOB_NUM_NODES * ${SLURM_NTASKS_PER_NODE:-1} ))}"
+echo "node $(hostname), SLURM job ${SLURM_JOB_ID} on ${SLURM_JOB_NODELIST}: ${ntasks} tasks on ${SLURM_JOB_NUM_NODES} nodes (SLURM_NTASKS=${SLURM_NTASKS:-unset}, SLURM_NTASKS_PER_NODE=${SLURM_NTASKS_PER_NODE:-unset})"
 echo "mpirun: $(command -v mpirun)"
 echo
 echo "=== srun --mpi=list"
 srun --mpi=list 2>&1
-for launcher in "mpirun -np ${SLURM_NTASKS}" "srun --mpi=pmi2 -n ${SLURM_NTASKS}" "srun -n ${SLURM_NTASKS}"; do
+for launcher in "mpirun -np ${ntasks}" "srun --mpi=pmi2 -n ${ntasks}" "srun -n ${ntasks}"; do
     echo
     echo "=== ${launcher} ./mpi_hello"
-    timeout 120 ${launcher} ./mpi_hello
+    timeout -k 10 120 ${launcher} ./mpi_hello
     echo "=== exit $?"
 done
 EOF

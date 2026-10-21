@@ -64,7 +64,8 @@ jobs:
             cat <<'EOF'
           # MPI environment: module initialized for a non-login shell, then the commands from the form
           if ! command -v module > /dev/null 2>&1; then
-              for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh \
+              for f in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /etc/profile.d/z00_lmod.sh \
+                       "${MODULESHOME:-/nonexistent}/init/bash" "${LMOD_PKG:-/nonexistent}/init/bash" \
                        /usr/share/lmod/lmod/init/bash /usr/share/Modules/init/bash; do
                   if [ -r "${f}" ]; then
                       source "${f}"
@@ -127,7 +128,7 @@ jobs:
       - name: Create the Job Script
         run: |
           set -e
-          rm -f mpi-hello.exit mpi-hello.out
+          rm -f mpi-hello.exit mpi-hello.out mpi-hello.layout
           {
             cat inputs.sh
             cat <<'EOF'
@@ -153,8 +154,13 @@ jobs:
               nodes=1
               np="${mpi_ntasks_per_node}"
           fi
+          # the layout actually launched, for the check: a directive typed in the form
+          # can change it from nodes x ranks per node
+          echo "${np} ${nodes}" > "${job_dir}/mpi-hello.layout"
           read -r -a launcher <<< "${mpi_launcher}"
-          cmd=("${launcher[@]}" "${np}" "${job_dir}/mpi_hello")
+          # bounded: ranks that cannot reach each other hang in the Allreduce, and on
+          # the login node no walltime would end them
+          cmd=(timeout -k 30 600 "${launcher[@]}" "${np}" "${job_dir}/mpi_hello")
           mpi_version="$( (mpichversion 2> /dev/null || mpirun --version 2> /dev/null) | head -n 1 )" || true
 
           echo "Host     : $(hostname)${SLURM_JOB_NODELIST:+, SLURM job ${SLURM_JOB_ID} on ${SLURM_JOB_NODELIST}}${PBS_JOBID:+, PBS job ${PBS_JOBID}}"
@@ -218,6 +224,7 @@ jobs:
               ${{ inputs.cluster.pbs.scheduler_directives }}
       - name: Check the Results
         run: |
+          set -o pipefail
           cd "${{ needs.preprocessing.outputs.JOB_DIR }}"
           source inputs.sh
           if [ ! -f mpi-hello.exit ]; then
@@ -231,26 +238,43 @@ jobs:
             tail -n 40 run.*.out 2>/dev/null
             exit 1
           fi
+          # the layout the job script launched (from its allocation, or the form on the
+          # login node); the form's nodes x ranks per node only when no directive overrode it
+          if [ ! -f mpi-hello.layout ]; then
+            echo "::error title=Error::No rank layout in ${PWD}/mpi-hello.layout: the job script did not reach the launch; the tail of its output follows"
+            tail -n 40 run.*.out 2>/dev/null
+            exit 1
+          fi
+          read -r np_launched nodes_allocated < mpi-hello.layout
+          if ! [[ "${np_launched}" =~ ^[0-9]+$ && "${nodes_allocated}" =~ ^[0-9]+$ ]]; then
+            echo "::error title=Error::Unreadable rank layout '${np_launched} ${nodes_allocated}' in ${PWD}/mpi-hello.layout"
+            exit 1
+          fi
           if [ "${mpi_scheduler:-false}" = true ] && [ -n "${mpi_nodes:-}" ]; then
-            expected=$(( mpi_nodes * mpi_ntasks_per_node ))
+            form_ranks=$(( mpi_nodes * mpi_ntasks_per_node ))
+            form_nodes="${mpi_nodes}"
           else
-            expected="${mpi_ntasks_per_node}"
+            form_ranks="${mpi_ntasks_per_node}"
+            form_nodes=1
+          fi
+          if [ "${np_launched}" != "${form_ranks}" ] || [ "${nodes_allocated}" != "${form_nodes}" ]; then
+            echo "::warning title=Layout::The job launched ${np_launched} ranks on ${nodes_allocated} node(s) where the form asked for ${form_ranks} on ${form_nodes}: a scheduler directive overrode the layout"
           fi
           echo "--- ${PWD}/mpi-hello.out"
           cat mpi-hello.out 2>/dev/null
           echo "---"
           ranks=$(grep -c '^Hello world from processor ' mpi-hello.out 2>/dev/null || true)
           hosts=$(grep '^Hello world from processor ' mpi-hello.out 2>/dev/null | sed 's/^Hello world from processor \(.*\), rank .*/\1/' | sort -u | wc -l | tr -d ' ')
-          if [ "${ranks}" -ne "${expected}" ]; then
-            echo "::error title=Error::${ranks} ranks said hello, ${expected} expected (nodes x ranks per node)"
+          if [ "${ranks:-0}" -ne "${np_launched}" ]; then
+            echo "::error title=Error::${ranks:-0} ranks said hello, ${np_launched} were launched"
             exit 1
           fi
           if ! grep -q '^Allreduce of the ranks: .*: OK$' mpi-hello.out; then
             echo "::error title=Error::The Allreduce check did not pass: the ranks did not communicate"
             exit 1
           fi
-          if [ "${mpi_scheduler:-false}" = true ] && [ "${mpi_nodes:-1}" -gt 1 ] && [ "${hosts}" -lt 2 ]; then
-            echo "::error title=Error::All ${ranks} ranks ran on one node; ${mpi_nodes} nodes were requested"
+          if [ "${nodes_allocated}" -gt 1 ] && [ "${hosts}" -lt 2 ]; then
+            echo "::error title=Error::All ${ranks} ranks ran on one node; the job had ${nodes_allocated}"
             exit 1
           fi
           echo "::notice title=MPI hello world::${ranks} ranks on ${hosts} node(s) said hello and the Allreduce check passed"
@@ -276,7 +300,7 @@ jobs:
             type: boolean
             default: true
             label: Submit to the scheduler
-            description: Otherwise the ranks run on the login node as a quick check.
+            description: Otherwise the job runs on the login node.
             hidden: ${{ inputs.resource.schedulerType == '' }}
             ignore: ${{ .hidden }}
           nodes:
@@ -451,4 +475,5 @@ jobs:
             tooltip: |
               mpirun -np launches with the MPI's own launcher (MPICH's Hydra and Open MPI both
               read the SLURM or PBS allocation); srun --mpi=pmi2 -n, or srun -n, launches with
-              SLURM's. The job runs <launcher> <ranks> mpi_hello.
+              SLURM's and needs the scheduler on: outside an allocation srun has nothing to
+              run on. The job runs <launcher> <ranks> mpi_hello, bounded by a 10-minute timeout.

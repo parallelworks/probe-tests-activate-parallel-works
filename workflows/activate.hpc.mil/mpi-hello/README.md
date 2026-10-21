@@ -85,19 +85,19 @@ and which launcher `mpi.launcher` should default to.
 With `pw` authenticated against the HSP platform:
 
 ```bash
-yaml=/abs/path/probe-tests-activate-parallel-works/workflows/activate.hpc.mil/mpi-hello/yamls/hsp.yaml
+cd /abs/path/probe-tests-activate-parallel-works/workflows/activate.hpc.mil/mpi-hello
 # validate the YAML and the submitter call without running anything
-pw workflows run --dry-run "${yaml}" -i '{"resource":"pw://avidalto/nautilus","cluster":{"scheduler":false,"ntasks_per_node":2},"mpi":{"load":"module load mpich/gnu/3.3.2","launcher":"mpirun -np"}}'
+pw workflows run --dry-run "${PWD}/yamls/hsp.yaml" -i '{"resource":"pw://avidalto/nautilus","cluster":{"scheduler":false,"ntasks_per_node":2},"mpi":{"load":"module load mpich/gnu/3.3.2","launcher":"mpirun -np"}}'
 # the login-node check
-pw workflows run "${yaml}" -i '{"resource":"pw://avidalto/nautilus","cluster":{"scheduler":false,"ntasks_per_node":2},"mpi":{"load":"module load mpich/gnu/3.3.2","launcher":"mpirun -np"}}'
-# two nodes, two ranks each: the inputs of tests/hsp/nautilus-compute.json
-pw workflows run "${yaml}" -i "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("_test", None); print(json.dumps(d))' tests/hsp/nautilus-compute.json)"
+pw workflows run "${PWD}/yamls/hsp.yaml" -i '{"resource":"pw://avidalto/nautilus","cluster":{"scheduler":false,"ntasks_per_node":2},"mpi":{"load":"module load mpich/gnu/3.3.2","launcher":"mpirun -np"}}'
+# two nodes, two ranks each: the inputs of tests/hsp/nautilus-compute.json without its _test object
+pw workflows run "${PWD}/yamls/hsp.yaml" -i "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("_test", None); print(json.dumps(d))' tests/hsp/nautilus-compute.json)"
 ```
 
-A CLI run applies no form defaults: pass every input the run needs (the account
-and QoS of an on-prem system above all; an empty `--qos=` makes `sbatch` reject
-the job). From the platform's UI, run the YAML as a file or register it as a
-workflow; the form lists the account and QoS from the resource.
+The account and QoS of an on-prem system have no default: pass them in a CLI run
+(an empty `--qos=` makes `sbatch` reject the job). From the platform's UI, run the
+YAML as a file or register it as a workflow; the form lists the account and QoS
+from the resource.
 
 A run passes when it reaches `completed`; its `Check the Results` step prints the
 ranks' output and a notice with the rank and node counts. A failed run says why in
