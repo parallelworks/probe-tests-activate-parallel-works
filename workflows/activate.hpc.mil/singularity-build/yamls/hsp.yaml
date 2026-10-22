@@ -368,11 +368,31 @@ jobs:
           echo "Started  : $(date)"
           echo
           t0=$(date +%s)
-          # in the background and waited for: bash runs a trap at once while in wait
-          # but only after a foreground pipeline ends
-          ( set -o pipefail; timeout -k 30 "${build_timeout_min}m" "${cmd[@]}" 2>&1 | tee "${PWD}/build.log" ) &
-          wait $!
-          status=$?
+          # a failed fetch of the base image, before anything was built, is retried:
+          # registries and site proxies drop connections now and then (FRAN's proxy
+          # closed a manifest request after 60 s with EOF, 2026-10-22)
+          attempts=3
+          attempt=1
+          while :; do
+            # in the background and waited for: bash runs a trap at once while in wait
+            # but only after a foreground pipeline ends
+            ( set -o pipefail; timeout -k 30 "${build_timeout_min}m" "${cmd[@]}" 2>&1 | tee "${PWD}/build.log" ) &
+            wait $!
+            status=$?
+            if [ "${status}" != 0 ] && [ "${status}" != 124 ] && [ "${attempt}" -lt "${attempts}" ] \
+                && ! grep -q 'Running post scriptlet' build.log \
+                && ! grep -q -i -E 'manifest unknown|not found|unauthorized|denied|no such host' build.log \
+                && grep -q -E 'conveyor failed to get|failed to get|toomanyrequests|TLS handshake timeout|i/o timeout|connection reset by peer|connection refused|EOF' build.log; then
+              cp build.log "build.attempt${attempt}.log"
+              echo "::warning title=Base image fetch::Attempt ${attempt} of ${attempts} could not fetch the base image ($(grep -m 1 'FATAL' build.log | cut -c1-200)); retrying in $(( attempt * 30 ))s"
+              rm -rf -- "${partial}"
+              sleep $(( attempt * 30 )) &
+              wait $!
+              attempt=$(( attempt + 1 ))
+              continue
+            fi
+            break
+          done
           seconds=$(( $(date +%s) - t0 ))
           echo
           echo "Finished : $(date), ${seconds}s, status ${status}"
@@ -386,6 +406,9 @@ jobs:
             fi
             if grep -q "'noexec' mount option" build.log; then
               echo "::error title=Build scratch::${tmp_dir} is mounted noexec and ${runtime_name} refuses to unpack an image there; set the build scratch directory to a local filesystem mounted without noexec (the Prepare step lists the options it checked)"
+            fi
+            if [ "${attempt}" -gt 1 ] && ! grep -q 'Running post scriptlet' build.log; then
+              echo "::error title=Base image fetch::${attempt} attempts could not fetch the base image the definition bootstraps from: the login node's route to the registry fails (a proxy that drops or refuses the connection, a rate limit; the Prepare step prints the proxy variables). Run again later, set https_proxy in the environment commands if the site needs one, or bootstrap from an image already on the system (Bootstrap: localimage)"
             fi
             if grep -q 'required to build this source as a non-root user' build.log; then
               echo "::error title=Root emulation::${runtime_version} builds a definition file as a non-root user only with --fakeroot (a subuid range for $(id -un): ${subuid_range:-none}) or the proot command on PATH; ask the site for either, or bootstrap from an image that needs no %post"

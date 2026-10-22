@@ -69,7 +69,11 @@ One job, `build`, on the login node:
    An existing image of that name is replaced, a SIF or a sandbox; a directory that
    is not a container sandbox (no `.singularity.d` in it) is never removed, and the
    run fails instead. The `%test` section of the definition
-   runs inside the build and fails it when it fails. On success the step prints
+   runs inside the build and fails it when it fails. A build that failed fetching
+   the base image, before `%post` ran, is tried up to three times, 30 s and 60 s
+   apart (a connection dropped, reset or refused on the way to the registry, a
+   rate limit); a missing tag, a denied pull or an unknown host fails at once.
+   Each failed attempt's output is kept as `build.attempt<N>.log`. On success the step prints
    `inspect`'s labels and publishes `IMAGE`, `IMAGE_SIZE`, `BUILD_SECONDS` and
    `RUNTIME`.
 5. **Test the Image**: `<runtime> exec <image> /bin/sh -c '<test command>'` under a
@@ -181,8 +185,8 @@ environment commands, or from PATH and the known modules when they are left empt
 | gcpsmall (Google cluster of activate.parallel.works) | Apptainer 1.4.5 on PATH, `subuid` configured, no proxy | empty | 2026-10-21 and 2026-10-22, the seven `gcpsmall-login-*` definitions |
 | awsstig (STIG-hardened AWS cluster of activate.parallel.works) | SingularityCE 4.5.1 in `/usr/local/bin`, `subuid` range (the workflow adds `--fakeroot`); `/tmp`, `/var/tmp` and `/dev/shm` all mounted `noexec`, so the scratch falls back to the cache directory; `squashfs` disabled by `install squashfs /bin/false`, no `squashfuse`: the same restrictions as the HSP systems | empty | 2026-10-22: `python-numpy-auto` builds and fails the test on the SIF mount (a finding); `python-numpy-sandbox-auto` passes |
 | Nautilus (Navy DSRC) | Apptainer 1.3.6 on PATH, `subuid` mapping, reaches Docker Hub; home is a network filesystem, so the build scratch must stay on the local disk (the default) | empty | 2026-10-21, `python-numpy-auto` and `rocky9-mpich-fakeroot`, by hand on the platform |
-| FRAN (ARL DSRC) | Apptainer 1.5.3 in `/opt/apptainer/bin` (`singularity` is its alias there), added to PATH by the login profile only; `/tmp` is mounted `noexec`, the scratch fell back to the cache directory on the home filesystem and the unpack worked there; HTTPS is re-signed by the site's proxy, so a `%post` that downloads needs the node's CA bundle (above) | empty | 2026-10-21: the default definition builds up to `pip install`, which fails on the certificate (a finding, kept as a test). 2026-10-22: `python-numpy-siteca-auto` passed by hand on the platform |
-| awssmall (AWS cluster of activate.hpc.mil) | SingularityCE 4.5.1 in `/usr/local/bin`, which the step's PATH lacks; builds with `--fakeroot` (the user has a `subuid` range, the workflow adds the flag); the node cannot mount a SIF: its kernel has no `squashfs` and there is no `squashfuse`, so a built image does not run there | empty | 2026-10-21 and 2026-10-22: `python-numpy-auto` builds in 43 to 48 s and fails the test command on the SIF mount, named by the workflow; a finding for the cluster's image (enable `squashfs` or install `squashfuse`). The sandbox definition is the working form, run pending |
+| FRAN (ARL DSRC) | Apptainer 1.5.3 in `/opt/apptainer/bin` (`singularity` is its alias there), added to PATH by the login profile only; `/tmp` is mounted `noexec`, the scratch fell back to the cache directory on the home filesystem and the unpack worked there; HTTPS is re-signed by the site's proxy, so a `%post` that downloads needs the node's CA bundle (above) | empty | 2026-10-21: the default definition builds up to `pip install`, which fails on the certificate (a finding, kept as a test). 2026-10-22: `python-numpy-siteca-auto` passed by hand on the platform; `rocky9-gcc-siteca-fakeroot` failed once fetching `rockylinux:9` (the manifest request closed with `EOF` after 60 s; the same request answers in 0.1 s from awsstig), so the fetch is now retried |
+| awssmall (AWS cluster of activate.hpc.mil) | SingularityCE 4.5.1 in `/usr/local/bin`, which the step's PATH lacks; builds with `--fakeroot` (the user has a `subuid` range, the workflow adds the flag); the node cannot mount a SIF: its kernel has no `squashfs` and there is no `squashfuse`, so a built image does not run there | empty | 2026-10-21 and 2026-10-22: `python-numpy-auto` builds in 43 to 48 s and fails the test command on the SIF mount, named by the workflow; a finding for the cluster's image (enable `squashfs` or install `squashfuse`). 2026-10-22: `python-numpy-sandbox-auto` passed by hand on the platform |
 
 ## Running it
 
@@ -229,7 +233,7 @@ for CLI runs, `~/pw/jobs/<workflow-name>/<run-number>/` for registered ones):
 inputs.sh          the form values the steps saw, resolved (paths expanded, defaults applied)
 runtime-env.sh     the runtime environment file every step sources
 container.def      the definition the image was built from
-build.log          the build's output
+build.log          the build's output (build.attempt<N>.log: a base-image fetch that was retried)
 test-command.txt   the test command, test.out its output
 logs/build/step_N/step.out   the step traces (::error lines say why a run failed)
 ```
@@ -277,6 +281,12 @@ working alternative is a second test, not a change to the first.
   as a non-root user`**: SingularityCE without a `subuid` range for the user and
   without `proot` (Root emulation, above). Ask the site for either; a definition
   whose `%post` needs no root can bootstrap from a prebuilt image instead.
+- **`conveyor failed to get: ... EOF`** (or a reset, a timeout, `toomanyrequests`)
+  before `%post` ran: the connection to the registry failed on the way. The build
+  retries it twice; when all three attempts fail the route itself is broken (a proxy
+  that drops the connection, a rate limit). Run again later, set the proxy in the
+  environment commands if the site needs one, or bootstrap from an image already on
+  the system (`Bootstrap: localimage`).
 - **`CERTIFICATE_VERIFY_FAILED` or `unable to get local issuer certificate` inside
   `%post`** while the image pull worked: the site's proxy re-signs HTTPS. Copy the
   node's bundle in (A site whose proxy re-signs HTTPS, above).
