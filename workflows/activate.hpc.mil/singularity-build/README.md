@@ -50,7 +50,9 @@ One job, `build`, on the login node:
    `WORKDIR` and `TMPDIR`, `proot`, whether the kernel has `squashfs` and
    `squashfuse` is there (what running a SIF needs), the node's CA bundle (copied to
    `site-ca-bundle.crt` in the job directory for `%files`, below), and the filesystem
-   and free space of the image, cache and scratch directories. The build scratch is the form's directory or,
+   and free space of the image, cache and scratch directories. It warns before the
+   build when the node cannot mount a SIF and the build is not a sandbox (A node
+   that cannot mount a SIF, below). The build scratch is the form's directory or,
    when it is empty, the first of `TMPDIR`, `/tmp`, `/var/tmp` and `/dev/shm` that
    is writable, not mounted `noexec` and on a local filesystem (each option is listed
    with what disqualified it), with a warning when the one picked is `noexec` or a
@@ -63,7 +65,10 @@ One job, `build`, on the login node:
    build scratch directory. The image is built under a temporary name
    (`.<image>.<run slug>.partial`) in the image directory and renamed once complete,
    so a failed or cancelled build never leaves a half-written file under the final
-   name; the trap removes the temporary file. The `%test` section of the definition
+   name; the trap removes the temporary file, or directory for a `--sandbox` build.
+   An existing image of that name is replaced, a SIF or a sandbox; a directory that
+   is not a container sandbox (no `.singularity.d` in it) is never removed, and the
+   run fails instead. The `%test` section of the definition
    runs inside the build and fails it when it fails. On success the step prints
    `inspect`'s labels and publishes `IMAGE`, `IMAGE_SIZE`, `BUILD_SECONDS` and
    `RUNTIME`.
@@ -77,12 +82,12 @@ One job, `build`, on the login node:
 |---|---|
 | Compute resource | The cluster. The image is built on its login node, which needs the runtime and access to the registry the definition bootstraps from. |
 | Definition file | What `singularity build` reads: a `Bootstrap:` line and the sections the image needs. The default builds `python:3.12-slim` with NumPy and tests the import. |
-| Image file name | Written into the image directory; `.sif` appended when missing; an existing image of that name is replaced. |
+| Image file name | Written into the image directory; `.sif` appended when missing, except for a `--sandbox` build, which writes a directory under the name as given; an existing image of that name is replaced. |
 | Image directory | Absolute path, created when missing, expanded by the shell (`${HOME}`, `${WORKDIR}`). Default `${HOME}/pw/software/containers`; on a DSRC system point it at `$WORKDIR` or a project directory. |
 | Test command | Run inside the built image through `/bin/sh -c` after the build; empty skips it. Default `cat /etc/os-release`. |
 | Build with --fakeroot | Off lets Apptainer choose its root emulation and gives SingularityCE `--fakeroot` when the user has a `subuid` range; on always passes `--fakeroot`. |
 | Build time limit | Minutes; the build is killed and the run fails when it is exceeded. Default 60. |
-| Extra build options | Appended to the build command: `--notest`, `--disable-cache`, Apptainer's `--ignore-subuid --ignore-fakeroot-command` (no root emulation at all). |
+| Extra build options | Appended to the build command: `--notest`, `--disable-cache`, `--sandbox` (a directory image, for a node that cannot mount a SIF), Apptainer's `--ignore-subuid --ignore-fakeroot-command` (no root emulation at all). |
 | Environment commands | Empty finds the runtime itself (the step's PATH, the usual install directories, the login shell's PATH, the known modules); otherwise the commands that provide one or set a proxy, one per line, run before every step. |
 | Cache directory | The downloaded image layers. Empty: `.cache` under the image directory; a shared filesystem is fine. |
 | Build scratch directory | Where the build unpacks the image, with room for the uncompressed image. Empty: the first of `TMPDIR`, `/tmp`, `/var/tmp` and `/dev/shm` that is writable, not mounted `noexec` and on a local disk. |
@@ -123,7 +128,7 @@ HTTPS with the site's own certificate authority. The node trusts it, so the imag
 pull in the build works; a container's own CA bundle does not, so `pip`, `dnf`, `apt`,
 `curl` or `git` inside `%post` fail with `CERTIFICATE_VERIFY_FAILED: unable to get
 local issuer certificate` (FRAN, 2026-10-21, `pip install` in the default
-definition). Apptainer cannot bind a host file onto a path the image lacks, and
+definition; the `siteca` form passed there on 2026-10-22). Apptainer cannot bind a host file onto a path the image lacks, and
 `%post` inherits nothing from the host environment (both verified on gcpsmall), so
 the definition has to carry the bundle in. The workflow makes that one line: the
 build runs in the job directory, where Prepare copies the node's bundle as
@@ -150,6 +155,22 @@ and `update-ca-trust` first thing in `%post`; on Debian or Ubuntu
 recipes. The host bundle holds the public authorities too, so a definition written
 this way builds the same on a site without interception.
 
+## A node that cannot mount a SIF
+
+Running a SIF needs the kernel's `squashfs` or, for an unprivileged mount,
+`squashfuse`. A STIG-hardened image disables the module with an
+`install squashfs /bin/false` rule in `/etc/modprobe.d` (awssmall on activate.hpc.mil
+and awsstig on activate.parallel.works, 2026-10-22). There the build works and
+`exec` of the SIF fails with `squashfs filesystem seems not enabled and/or supported
+by your kernel`. The Prepare step's `squashfs` line names the rule, and a warning
+before the build says the test will fail. The image itself is fine and runs on any
+node that can mount it.
+
+To run on such a node, build a sandbox: `--sandbox` in the extra options writes the
+image as a directory, which `exec` and `run` use without mounting anything. It is
+larger on disk and many files instead of one, so it is the fallback for those
+nodes, not the default. The `python-numpy-sandbox` test definition is the recipe.
+
 ## Other systems
 
 Nothing in the workflow is specific to one system: the runtime comes from the
@@ -157,10 +178,11 @@ environment commands, or from PATH and the known modules when they are left empt
 
 | System | Runtime | Environment commands | Verified |
 |---|---|---|---|
-| gcpsmall (Google cluster of activate.parallel.works) | Apptainer 1.4.5 on PATH, `subuid` configured, no proxy | empty | 2026-10-21, all three test definitions |
+| gcpsmall (Google cluster of activate.parallel.works) | Apptainer 1.4.5 on PATH, `subuid` configured, no proxy | empty | 2026-10-21 and 2026-10-22, the seven `gcpsmall-login-*` definitions |
+| awsstig (STIG-hardened AWS cluster of activate.parallel.works) | SingularityCE 4.5.1 in `/usr/local/bin`, `subuid` range (the workflow adds `--fakeroot`); `/tmp`, `/var/tmp` and `/dev/shm` all mounted `noexec`, so the scratch falls back to the cache directory; `squashfs` disabled by `install squashfs /bin/false`, no `squashfuse`: the same restrictions as the HSP systems | empty | 2026-10-22: `python-numpy-auto` builds and fails the test on the SIF mount (a finding); `python-numpy-sandbox-auto` passes |
 | Nautilus (Navy DSRC) | Apptainer 1.3.6 on PATH, `subuid` mapping, reaches Docker Hub; home is a network filesystem, so the build scratch must stay on the local disk (the default) | empty | 2026-10-21, `python-numpy-auto` and `rocky9-mpich-fakeroot`, by hand on the platform |
-| FRAN (ARL DSRC) | Apptainer 1.5.3 in `/opt/apptainer/bin` (`singularity` is its alias there), added to PATH by the login profile only; `/tmp` is mounted `noexec`, the scratch fell back to the cache directory on the home filesystem and the unpack worked there; HTTPS is re-signed by the site's proxy, so a `%post` that downloads needs the node's CA bundle (above) | empty | 2026-10-21: the default definition builds up to `pip install`, which fails on the certificate; the `siteca` definitions are the working form, run pending |
-| awssmall (AWS cluster of activate.hpc.mil) | SingularityCE 4.5.1 in `/usr/local/bin`, which the step's PATH lacks; builds with `--fakeroot` (the user has a `subuid` range, the workflow adds the flag); the node cannot mount a SIF: its kernel has no `squashfs` and there is no `squashfuse`, so a built image does not run there | empty | 2026-10-21: `python-numpy-auto` builds in 48 s and fails the test command on the SIF mount; a finding for the cluster's image (enable `squashfs` or install `squashfuse`) |
+| FRAN (ARL DSRC) | Apptainer 1.5.3 in `/opt/apptainer/bin` (`singularity` is its alias there), added to PATH by the login profile only; `/tmp` is mounted `noexec`, the scratch fell back to the cache directory on the home filesystem and the unpack worked there; HTTPS is re-signed by the site's proxy, so a `%post` that downloads needs the node's CA bundle (above) | empty | 2026-10-21: the default definition builds up to `pip install`, which fails on the certificate (a finding, kept as a test). 2026-10-22: `python-numpy-siteca-auto` passed by hand on the platform |
+| awssmall (AWS cluster of activate.hpc.mil) | SingularityCE 4.5.1 in `/usr/local/bin`, which the step's PATH lacks; builds with `--fakeroot` (the user has a `subuid` range, the workflow adds the flag); the node cannot mount a SIF: its kernel has no `squashfs` and there is no `squashfuse`, so a built image does not run there | empty | 2026-10-21 and 2026-10-22: `python-numpy-auto` builds in 43 to 48 s and fails the test command on the SIF mount, named by the workflow; a finding for the cluster's image (enable `squashfs` or install `squashfuse`). The sandbox definition is the working form, run pending |
 
 ## Running it
 
@@ -260,9 +282,9 @@ working alternative is a second test, not a change to the first.
   node's bundle in (A site whose proxy re-signs HTTPS, above).
 - **The build passes and the test fails with `squashfs filesystem seems not enabled
   and/or supported by your kernel`**: the node cannot mount a SIF (the Prepare
-  step's `squashfs` line: no kernel module and no `squashfuse`, awssmall 2026-10-21).
-  The image is fine; it runs once the site enables `squashfs` or installs
-  `squashfuse`, or build with `--sandbox` in the extra options for a directory image.
+  step's `squashfs` line, usually a STIG rule that disables the module). The image is
+  fine; it runs once the site enables `squashfs` or installs `squashfuse`, or build
+  with `--sandbox` (A node that cannot mount a SIF, above).
 - **`No space left on device` during the build**: the scratch filesystem is full (the
   build unpacks the whole image there). Set the build scratch directory to a larger
   local filesystem; the cache directory holds the compressed layers and can stay.
@@ -278,7 +300,7 @@ working alternative is a second test, not a change to the first.
 
 A test is named after the cluster, `login`, the definition and the root emulation it
 was submitted with: `<cluster>-login-<definition>-<auto|fakeroot|norootemulation>`,
-or what else it varies (`workdir`).
+or what else it varies (`workdir`, `sandbox`).
 The definitions live under `tests/<platform>/<user>/singularity-build/` at the root
 of this repository, point `workflow.repo` at this repository and `workflow.ref` at the
 branch the workflow is on (`hsp-tests-singularity` while it is developed there), and
@@ -298,8 +320,11 @@ The definitions the tests build, each a few minutes at most on a warm cache:
 | `multistage` | a two-stage definition: compiled with gcc in a `rockylinux:9` stage, copied with `%files from` into a `rockylinux:9-minimal` image without the compiler |
 | `python-numpy-workdir` (DSRC systems) | the default definition with the image and cache under `$WORKDIR`, where a DSRC keeps large files; shows whether a workflow step sees `WORKDIR` |
 | `python-numpy-siteca` | the default definition with the node's CA bundle copied in and `pip` pointed at it: the form for a site whose proxy re-signs HTTPS |
+| `python-numpy-sandbox` | the default definition built with `--sandbox`, a directory image: the form for a node that cannot mount a SIF |
 | `rocky9-gcc-siteca` | `rocky9-gcc` with the bundle added to the image's trust store (`update-ca-trust`) before `dnf`, submitted with `--fakeroot` |
 
-The gcpsmall tests (`gcpsmall-login-*`) are how the workflow is tested from the cloud
-before a run on HSP; all seven passed through `python3 -m probe run` on 2026-10-21
-and 2026-10-22.
+The activate.parallel.works tests are how the workflow is tested from the cloud before
+a run on HSP. The seven `gcpsmall-login-*` definitions passed through
+`python3 -m probe run` on 2026-10-21 and 2026-10-22. The `awsstig-login-*` ones run on
+a STIG-hardened image that has the same restrictions as the HSP systems (`noexec`
+scratch, no SIF mount, SingularityCE), so it is where a change is tried first now.

@@ -57,7 +57,13 @@ jobs:
             echo "::error::The image file name must be letters, digits, dots, dashes and underscores, got '${image_name}'"
             exit 1
           fi
-          case "${image_name}" in *.sif) ;; *) image_name="${image_name}.sif" ;; esac
+          # a --sandbox build writes a directory, named as given; a SIF gets its suffix
+          if grep -q -E '(^|[[:space:]])(--sandbox|-s)([[:space:]]|$)' build-options.txt; then
+            build_sandbox=true
+          else
+            build_sandbox=false
+            case "${image_name}" in *.sif) ;; *) image_name="${image_name}.sif" ;; esac
+          fi
           if ! [[ "${build_timeout_min}" =~ ^[0-9]+$ ]] || [ "${build_timeout_min}" -lt 1 ]; then
             echo "::error::The build time limit must be a positive number of minutes, got '${build_timeout_min}'"
             exit 1
@@ -75,6 +81,7 @@ jobs:
             echo "export image=\"${output_dir}/${image_name}\""
             echo "export build_timeout_min=\"${build_timeout_min}\""
             echo "export build_fakeroot=\"${build_fakeroot:-false}\""
+            echo "export build_sandbox=\"${build_sandbox}\""
           } >> inputs.sh
           cat inputs.sh
           echo "--- test command: $(cat test-command.txt)"
@@ -211,15 +218,27 @@ jobs:
           echo "user namespaces: $(cat /proc/sys/user/max_user_namespaces 2> /dev/null || echo unknown) allowed"
           echo "setuid starter : $(grep -h -E '^allow setuid' /etc/apptainer/apptainer.conf /etc/singularity/singularity.conf /usr/local/etc/apptainer/apptainer.conf /usr/local/etc/singularity/singularity.conf 2> /dev/null | head -n 1 || echo unknown)"
           # what running the finished SIF needs: the kernel's squashfs, or squashfuse
-          # for an unprivileged mount (awssmall's hardened image has neither, 2026-10-21)
+          # for an unprivileged mount. A STIG image disables the module with
+          # "install squashfs /bin/false" (awssmall and awsstig, 2026-10-22)
+          squashfs_rule=$(modprobe -n -v squashfs 2> /dev/null | grep -E '^install[[:space:]]+/(usr/)?bin/(false|true)' | head -n 1 | sed 's/[[:space:]]*$//')
+          sif_mount=true
           if grep -qw squashfs /proc/filesystems 2> /dev/null; then
             squashfs="registered in the kernel"
+          elif [ -n "${squashfs_rule}" ]; then
+            squashfs="disabled by the modprobe rule '${squashfs_rule}', a STIG setting"
+            sif_mount=false
           elif modprobe -n -q squashfs 2> /dev/null; then
-            squashfs="kernel module available, not loaded"
+            squashfs="kernel module available, loaded on the first mount"
           else
-            squashfs="not available in the kernel (a SIF cannot be mounted without squashfuse)"
+            squashfs="not available in the kernel"
+            sif_mount=false
           fi
-          echo "squashfs       : ${squashfs}; squashfuse: $(command -v squashfuse 2> /dev/null || echo none)"
+          squashfuse=$(command -v squashfuse 2> /dev/null || true)
+          [ -n "${squashfuse}" ] && sif_mount=true
+          echo "squashfs       : ${squashfs}; squashfuse: ${squashfuse:-none}"
+          if [ "${sif_mount}" = false ] && [ "${build_sandbox}" != true ]; then
+            echo "::warning title=SIF mount::This node cannot mount a SIF (squashfs ${squashfs}, no squashfuse): the image will build but the Test step will fail; --sandbox in the extra options builds a directory image that runs here"
+          fi
           echo "CA bundle      : ${site_ca:-none found}${site_ca:+ ($(grep -c 'BEGIN CERT' site-ca-bundle.crt) certificates, copied to ${PWD}/site-ca-bundle.crt for %files)}"
           echo "proxy          : https_proxy=${https_proxy:-${HTTPS_PROXY:-unset}} no_proxy=${no_proxy:-${NO_PROXY:-unset}}"
           echo "HOME           : ${HOME}, WORKDIR: ${WORKDIR:-unset}, TMPDIR: ${TMPDIR:-unset}"
@@ -315,11 +334,12 @@ jobs:
           export APPTAINER_CACHEDIR="${cache_dir}" SINGULARITY_CACHEDIR="${cache_dir}"
           export APPTAINER_TMPDIR="${tmp_dir}" SINGULARITY_TMPDIR="${tmp_dir}"
           partial="${output_dir}/.${image_name}.${PW_RUN_SLUG}.partial"
-          trap 'rm -f "${partial}"' EXIT
+          # a file, or with --sandbox a directory; always this run's own temporary path
+          trap 'rm -rf -- "${partial}"' EXIT
           trap 'exit 129' HUP
           trap 'exit 130' INT
           trap 'exit 143' TERM
-          rm -f "${partial}"
+          rm -rf -- "${partial}"
           cmd=("${runtime_cmd}" build --force)
           if [ "${build_fakeroot}" = true ]; then
             cmd+=(--fakeroot)
@@ -374,13 +394,25 @@ jobs:
             tail -n 30 build.log
             exit 1
           fi
-          if ! [ -s "${partial}" ]; then
+          if ! { [ -f "${partial}" ] && [ -s "${partial}" ]; } && ! [ -d "${partial}/.singularity.d" ]; then
             echo "::error title=Error::The build reported success but left no image at ${partial}"
             exit 1
           fi
-          mv -f "${partial}" "${image}"
+          # an existing image of that name is replaced, a SIF or a sandbox; a directory
+          # that is not a container sandbox is never removed
+          if [ -d "${image}" ] && [ ! -L "${image}" ]; then
+            if [ ! -d "${image}/.singularity.d" ]; then
+              echo "::error title=Error::${image} is a directory that is not a container sandbox, so it was not replaced; choose another image file name"
+              exit 1
+            fi
+            chmod -R u+rwX "${image}" 2> /dev/null || true
+            rm -rf -- "${image}"
+          elif [ -d "${partial}" ] && { [ -e "${image}" ] || [ -L "${image}" ]; }; then
+            rm -f -- "${image}"
+          fi
+          mv -f -T "${partial}" "${image}"
           chmod a+r "${image}"
-          size=$(du -h "${image}" | cut -f1)
+          size=$(du -sh "${image}" | cut -f1)
           echo "--- ${runtime_name} inspect ${image}"
           "${runtime_cmd}" inspect "${image}" 2>&1 || true
           echo "::notice title=Image built::${image} (${size}) in ${seconds}s with ${runtime_version}"
@@ -467,7 +499,7 @@ jobs:
           image_name:
             type: string
             label: Image file name
-            description: Written into the image directory; .sif is appended when missing and an existing image of that name is replaced.
+            description: Written into the image directory; .sif is appended when missing (a --sandbox build writes a directory under the name as given) and an existing image of that name is replaced.
             default: container.sif
           output_dir:
             type: string
@@ -517,11 +549,13 @@ jobs:
             type: string
             label: Extra build options
             optional: true
-            description: Appended to the build command, for example --notest or --disable-cache.
+            description: Appended to the build command, for example --notest, --disable-cache or --sandbox.
             tooltip: |
               Anything singularity build accepts before the image and definition
               paths. --notest skips the %test section; --disable-cache fetches
-              every layer again; Apptainer's --ignore-subuid --ignore-fakeroot-command
+              every layer again; --sandbox writes a directory instead of a SIF, which
+              runs on a node that cannot mount a SIF (no squashfs in the kernel and
+              no squashfuse); Apptainer's --ignore-subuid --ignore-fakeroot-command
               builds without any root emulation, as the plain user.
           environment:
             type: editor
