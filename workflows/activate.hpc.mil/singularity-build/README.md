@@ -47,8 +47,10 @@ One job, `build`, on the login node:
    run when a fresh shell that sources the file has no runtime. Then prints what an
    unprivileged build depends on: the runtime version, the user's `subuid` range,
    the user namespace limit, the `allow setuid` setting, the proxy variables, `HOME`,
-   `WORKDIR` and `TMPDIR`, `proot`, and the filesystem and free space of the image,
-   cache and scratch directories. The build scratch is the form's directory or,
+   `WORKDIR` and `TMPDIR`, `proot`, whether the kernel has `squashfs` and
+   `squashfuse` is there (what running a SIF needs), the node's CA bundle (copied to
+   `site-ca-bundle.crt` in the job directory for `%files`, below), and the filesystem
+   and free space of the image, cache and scratch directories. The build scratch is the form's directory or,
    when it is empty, the first of `TMPDIR`, `/tmp`, `/var/tmp` and `/dev/shm` that
    is writable, not mounted `noexec` and on a local filesystem (each option is listed
    with what disqualified it), with a warning when the one picked is `noexec` or a
@@ -114,6 +116,40 @@ image's root filesystem, and the runtimes differ:
   scratch is a separate input from the cache and, left empty, is chosen among
   `TMPDIR`, `/tmp`, `/var/tmp` and `/dev/shm` by those two checks.
 
+## A site whose proxy re-signs HTTPS
+
+On a DSRC network the login node reaches the internet through a proxy that re-signs
+HTTPS with the site's own certificate authority. The node trusts it, so the image
+pull in the build works; a container's own CA bundle does not, so `pip`, `dnf`, `apt`,
+`curl` or `git` inside `%post` fail with `CERTIFICATE_VERIFY_FAILED: unable to get
+local issuer certificate` (FRAN, 2026-10-21, `pip install` in the default
+definition). Apptainer cannot bind a host file onto a path the image lacks, and
+`%post` inherits nothing from the host environment (both verified on gcpsmall), so
+the definition has to carry the bundle in. The workflow makes that one line: the
+build runs in the job directory, where Prepare copies the node's bundle as
+`site-ca-bundle.crt` (the first of `/etc/pki/tls/certs/ca-bundle.crt`,
+`/etc/ssl/certs/ca-certificates.crt`, `/etc/ssl/ca-bundle.pem`, ... that exists;
+the report says which), and `%files` resolves a relative source against that
+directory:
+
+```
+%files
+    site-ca-bundle.crt /etc/pw-site-ca.crt
+
+%post
+    export SSL_CERT_FILE=/etc/pw-site-ca.crt PIP_CERT=/etc/pw-site-ca.crt REQUESTS_CA_BUNDLE=/etc/pw-site-ca.crt CURL_CA_BUNDLE=/etc/pw-site-ca.crt GIT_SSL_CAINFO=/etc/pw-site-ca.crt
+    pip install ...
+```
+
+That covers Python, `pip`, `requests`, `curl` and `git`. A package manager reads the
+image's trust store instead, so for it the bundle goes into the store: on a Rocky or
+RHEL image `%files site-ca-bundle.crt /etc/pki/ca-trust/source/anchors/pw-site-ca.crt`
+and `update-ca-trust` first thing in `%post`; on Debian or Ubuntu
+`%files site-ca-bundle.crt /usr/local/share/ca-certificates/pw-site-ca.crt` and
+`update-ca-certificates`. The `siteca` test definitions (Tests, below) are both
+recipes. The host bundle holds the public authorities too, so a definition written
+this way builds the same on a site without interception.
+
 ## Other systems
 
 Nothing in the workflow is specific to one system: the runtime comes from the
@@ -123,8 +159,8 @@ environment commands, or from PATH and the known modules when they are left empt
 |---|---|---|---|
 | gcpsmall (Google cluster of activate.parallel.works) | Apptainer 1.4.5 on PATH, `subuid` configured, no proxy | empty | 2026-10-21, all three test definitions |
 | Nautilus (Navy DSRC) | Apptainer 1.3.6 on PATH, `subuid` mapping, reaches Docker Hub; home is a network filesystem, so the build scratch must stay on the local disk (the default) | empty | 2026-10-21, `python-numpy-auto` and `rocky9-mpich-fakeroot`, by hand on the platform |
-| FRAN (ARL DSRC) | Apptainer 1.5.3 in `/opt/apptainer/bin` (`singularity` is its alias there), added to PATH by the login profile only; `/tmp` is mounted `noexec`, so the scratch has to be elsewhere | empty | 2026-10-21: the runtime lookup and the `noexec` refusal each failed one run and were fixed; rerun pending |
-| awssmall (AWS cluster of activate.hpc.mil) | SingularityCE 4.5.1 in `/usr/local/bin`, which the step's PATH lacks; refuses a definition file without `--fakeroot` or `proot` | empty | 2026-10-21: the runtime lookup and the `--fakeroot` refusal each failed one run and were fixed; rerun pending |
+| FRAN (ARL DSRC) | Apptainer 1.5.3 in `/opt/apptainer/bin` (`singularity` is its alias there), added to PATH by the login profile only; `/tmp` is mounted `noexec`, the scratch fell back to the cache directory on the home filesystem and the unpack worked there; HTTPS is re-signed by the site's proxy, so a `%post` that downloads needs the node's CA bundle (above) | empty | 2026-10-21: the default definition builds up to `pip install`, which fails on the certificate; the `siteca` definitions are the working form, run pending |
+| awssmall (AWS cluster of activate.hpc.mil) | SingularityCE 4.5.1 in `/usr/local/bin`, which the step's PATH lacks; builds with `--fakeroot` (the user has a `subuid` range, the workflow adds the flag); the node cannot mount a SIF: its kernel has no `squashfs` and there is no `squashfuse`, so a built image does not run there | empty | 2026-10-21: `python-numpy-auto` builds in 48 s and fails the test command on the SIF mount; a finding for the cluster's image (enable `squashfs` or install `squashfuse`) |
 
 ## Running it
 
@@ -219,6 +255,14 @@ working alternative is a second test, not a change to the first.
   as a non-root user`**: SingularityCE without a `subuid` range for the user and
   without `proot` (Root emulation, above). Ask the site for either; a definition
   whose `%post` needs no root can bootstrap from a prebuilt image instead.
+- **`CERTIFICATE_VERIFY_FAILED` or `unable to get local issuer certificate` inside
+  `%post`** while the image pull worked: the site's proxy re-signs HTTPS. Copy the
+  node's bundle in (A site whose proxy re-signs HTTPS, above).
+- **The build passes and the test fails with `squashfs filesystem seems not enabled
+  and/or supported by your kernel`**: the node cannot mount a SIF (the Prepare
+  step's `squashfs` line: no kernel module and no `squashfuse`, awssmall 2026-10-21).
+  The image is fine; it runs once the site enables `squashfs` or installs
+  `squashfuse`, or build with `--sandbox` in the extra options for a directory image.
 - **`No space left on device` during the build**: the scratch filesystem is full (the
   build unpacks the whole image there). Set the build scratch directory to a larger
   local filesystem; the cache directory holds the compressed layers and can stay.
@@ -253,6 +297,9 @@ The definitions the tests build, each a few minutes at most on a warm cache:
 | `rocky9-mpich` | MPICH from Rocky 9's AppStream and an MPI hello world compiled in `%post`; two ranks run inside the finished image with the container's own `mpirun`, Allreduce checked: the container an HPC job would run |
 | `multistage` | a two-stage definition: compiled with gcc in a `rockylinux:9` stage, copied with `%files from` into a `rockylinux:9-minimal` image without the compiler |
 | `python-numpy-workdir` (DSRC systems) | the default definition with the image and cache under `$WORKDIR`, where a DSRC keeps large files; shows whether a workflow step sees `WORKDIR` |
+| `python-numpy-siteca` | the default definition with the node's CA bundle copied in and `pip` pointed at it: the form for a site whose proxy re-signs HTTPS |
+| `rocky9-gcc-siteca` | `rocky9-gcc` with the bundle added to the image's trust store (`update-ca-trust`) before `dnf`, submitted with `--fakeroot` |
 
 The gcpsmall tests (`gcpsmall-login-*`) are how the workflow is tested from the cloud
-before a run on HSP; all five passed through `python3 -m probe run` on 2026-10-21.
+before a run on HSP; all seven passed through `python3 -m probe run` on 2026-10-21
+and 2026-10-22.

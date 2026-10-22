@@ -190,6 +190,17 @@ jobs:
             echo "export subuid_range=\"${subuid_range}\""
           } >> inputs.sh
           echo "::notice title=Container runtime::${runtime_version} at ${runtime_cmd}, from ${found}"
+          # the node's CA bundle, for a definition built on a site whose proxy re-signs
+          # HTTPS (FRAN, 2026-10-21): the node trusts the site's CA, a container's own
+          # bundle does not; "%files site-ca-bundle.crt /etc/pw-site-ca.crt" copies it in
+          rm -f site-ca-bundle.crt
+          site_ca=""
+          for f in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt /etc/ssl/ca-bundle.pem /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/cert.pem; do
+            if [ -r "${f}" ] && grep -q 'BEGIN CERT' "${f}" 2> /dev/null; then
+              cp "${f}" site-ca-bundle.crt && site_ca="${f}"
+              break
+            fi
+          done
           echo "--- runtime-env.sh"
           cat runtime-env.sh
           # what an unprivileged build depends on, for the log of a failing system
@@ -198,7 +209,18 @@ jobs:
           echo "subuid range   : ${subuid_range:-none: no --fakeroot uid mapping for $(id -un)}"
           echo "proot          : $(command -v proot 2> /dev/null || echo "none")"
           echo "user namespaces: $(cat /proc/sys/user/max_user_namespaces 2> /dev/null || echo unknown) allowed"
-          echo "setuid starter : $(grep -h -E '^allow setuid' /etc/apptainer/apptainer.conf /etc/singularity/singularity.conf 2> /dev/null | head -n 1 || echo unknown)"
+          echo "setuid starter : $(grep -h -E '^allow setuid' /etc/apptainer/apptainer.conf /etc/singularity/singularity.conf /usr/local/etc/apptainer/apptainer.conf /usr/local/etc/singularity/singularity.conf 2> /dev/null | head -n 1 || echo unknown)"
+          # what running the finished SIF needs: the kernel's squashfs, or squashfuse
+          # for an unprivileged mount (awssmall's hardened image has neither, 2026-10-21)
+          if grep -qw squashfs /proc/filesystems 2> /dev/null; then
+            squashfs="registered in the kernel"
+          elif modprobe -n -q squashfs 2> /dev/null; then
+            squashfs="kernel module available, not loaded"
+          else
+            squashfs="not available in the kernel (a SIF cannot be mounted without squashfuse)"
+          fi
+          echo "squashfs       : ${squashfs}; squashfuse: $(command -v squashfuse 2> /dev/null || echo none)"
+          echo "CA bundle      : ${site_ca:-none found}${site_ca:+ ($(grep -c 'BEGIN CERT' site-ca-bundle.crt) certificates, copied to ${PWD}/site-ca-bundle.crt for %files)}"
           echo "proxy          : https_proxy=${https_proxy:-${HTTPS_PROXY:-unset}} no_proxy=${no_proxy:-${NO_PROXY:-unset}}"
           echo "HOME           : ${HOME}, WORKDIR: ${WORKDIR:-unset}, TMPDIR: ${TMPDIR:-unset}"
           echo "step PATH      : ${PATH}"
@@ -388,6 +410,9 @@ jobs:
             exit 1
           fi
           if [ "${status}" != 0 ]; then
+            if grep -q -i 'squashfs filesystem seems not enabled' test.out; then
+              echo "::error title=SIF mount::The node cannot mount a SIF image: its kernel has no squashfs and ${runtime_name} found no squashfuse (the Prepare step's squashfs line); the image was built but cannot run here until the site enables the squashfs module or installs squashfuse, or build with --sandbox in the extra options for a directory image that needs neither"
+            fi
             echo "::error title=Error::The test command exited with status ${status} inside ${image}; its output is above"
             exit 1
           fi
@@ -432,7 +457,13 @@ jobs:
               %environment is sourced in every container, %runscript is what
               singularity run executes, %test runs at the end of the build and fails
               it when it fails. Bootstrapping from docker:// fetches the image from
-              the registry, so the login node needs network access to it.
+              the registry, so the login node needs network access to it. The build
+              runs in the job directory, where the node's CA bundle is placed as
+              site-ca-bundle.crt: on a site whose proxy re-signs HTTPS (pip or dnf fail
+              in %post with a certificate error), copy it in with
+              "%files site-ca-bundle.crt /etc/pw-site-ca.crt" and point the tools at
+              it (export SSL_CERT_FILE=/etc/pw-site-ca.crt PIP_CERT=... in %post, or
+              add it to the image's trust store with update-ca-trust).
           image_name:
             type: string
             label: Image file name
