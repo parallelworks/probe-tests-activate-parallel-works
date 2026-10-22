@@ -35,7 +35,7 @@ of a `parallelworks/workflows` checkout, validates the files. Commit, push, and 
 `Refresh` on the dashboard. A removed test keeps its history in the bucket until
 `Delete results` on the admin dashboard.
 
-## HSP (activate.hpc.mil), on the `hsp` branch
+## HSP (activate.hpc.mil)
 
 The tests for the HSP platform belong in its own GitLab repository; until that one is
 reachable they live on this branch, beside the activate.parallel.works ones:
@@ -43,14 +43,22 @@ reachable they live on this branch, beside the activate.parallel.works ones:
 ```
 tests/activate.hpc.mil/<user>/<workflow_name>/<name>.json   the definitions
 workflows/activate.hpc.mil/<workflow_name>/                  the workflows they launch: yamls/hsp.yaml, a README,
-                                                             the inputs under tests/hsp/, helper scripts
+                                                             helper scripts
 ```
 
-The definitions point `workflow.repo` at this repository and `workflow.ref` at `hsp`, so
-PROBE fetches the YAML from here. PROBE runs only the definitions whose `platform` and
-`user` match the `pw` context it runs under, so the GitHub actions above, which
-authenticate on activate.parallel.works, never run these: start PROBE's
-`general_run_tests.yaml` or `general.yaml` from the HSP platform (the user workspace or a
-login node with the `pw` CLI, `python3` and `git`) with `tests.repo` set to this
-repository, `tests.branch` to `hsp` and `tests.directory` to `tests`. The first test is
-`mpi-hello` on Nautilus: `workflows/activate.hpc.mil/mpi-hello/README.md`.
+The definitions point `workflow.repo` at this repository and `workflow.ref` at the
+branch the workflow is on, so PROBE fetches the YAML from here. PROBE runs only the
+definitions whose `platform` and `user` match the `pw` context it runs under, so the
+GitHub actions above, which authenticate on activate.parallel.works, never run these:
+start PROBE's `general_run_tests.yaml` or `general.yaml` from the HSP platform (the user
+workspace or a login node with the `pw` CLI, `python3` and `git`) with `tests.repo` set
+to this repository, `tests.branch` to the branch and `tests.directory` to `tests`.
+
+| Workflow | What it checks | README |
+|---|---|---|
+| `mpi-hello` | the cluster's MPI, as a two-node SLURM or PBS job or on the login node | `workflows/activate.hpc.mil/mpi-hello/README.md` |
+| `singularity-build` | an Apptainer or SingularityCE image built from a definition file on the login node, and run there | `workflows/activate.hpc.mil/singularity-build/README.md` |
+
+Each workflow's README says how its tests are named and what each one submits. The
+`singularity-build` definitions are on the `hsp-tests-singularity` branch, which their
+`workflow.ref` names, until they merge.

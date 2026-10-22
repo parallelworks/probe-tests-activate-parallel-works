@@ -1,0 +1,30 @@
+{
+  "name": "gcpsmall-login-multistage-auto",
+  "platform": "activate.parallel.works",
+  "user": "alvaro",
+  "workflow_name": "singularity-build",
+  "workflow": {
+    "repo": "github.com/parallelworks/probe-tests-activate-parallel-works",
+    "path": "workflows/activate.hpc.mil/singularity-build/yamls/hsp.yaml",
+    "ref": "hsp-tests-singularity"
+  },
+  "timeout_s": 1200,
+  "warm_marker": "${HOME}/pw/software/containers/.cache/cache/blob",
+  "inputs": {
+    "resource": "pw://alvaro/gcpsmall",
+    "container": {
+      "definition": "Bootstrap: docker\nFrom: rockylinux:9\nStage: build\n\n%post\n    dnf install -y --setopt=install_weak_deps=False gcc && dnf clean all\n    mkdir -p /opt/hello\n    printf '%s\\n' '#include <stdio.h>' 'int main(void) { puts(\"hello from a program compiled in the build stage\"); return 0; }' > /opt/hello/hello.c\n    gcc -O2 -o /opt/hello/hello /opt/hello/hello.c\n\nBootstrap: docker\nFrom: rockylinux:9-minimal\nStage: final\n\n%files from build\n    /opt/hello/hello /opt/hello/hello\n\n%runscript\n    exec /opt/hello/hello\n\n%test\n    /opt/hello/hello\n",
+      "image_name": "hello-multistage.sif",
+      "output_dir": "${HOME}/pw/software/containers",
+      "test_command": "/opt/hello/hello && cat /etc/os-release | head -n 1"
+    },
+    "build": {
+      "fakeroot": false,
+      "timeout_min": 30,
+      "options": "",
+      "environment": "",
+      "cache_dir": "",
+      "tmp_dir": ""
+    }
+  }
+}

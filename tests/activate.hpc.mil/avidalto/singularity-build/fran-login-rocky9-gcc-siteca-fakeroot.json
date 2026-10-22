@@ -1,0 +1,30 @@
+{
+  "name": "fran-login-rocky9-gcc-siteca-fakeroot",
+  "platform": "activate.hpc.mil",
+  "user": "avidalto",
+  "workflow_name": "singularity-build",
+  "workflow": {
+    "repo": "github.com/parallelworks/probe-tests-activate-parallel-works",
+    "path": "workflows/activate.hpc.mil/singularity-build/yamls/hsp.yaml",
+    "ref": "hsp-tests-singularity"
+  },
+  "timeout_s": 3600,
+  "warm_marker": "${HOME}/pw/software/containers/.cache/cache/blob",
+  "inputs": {
+    "resource": "pw://avidalto/fran",
+    "container": {
+      "definition": "Bootstrap: docker\nFrom: rockylinux:9\n\n%files\n    site-ca-bundle.crt /etc/pki/ca-trust/source/anchors/pw-site-ca.crt\n\n%post\n    # the login node's CA bundle, added to the image's trust store: a site whose\n    # proxy re-signs HTTPS is trusted by dnf, curl and everything else\n    update-ca-trust\n    dnf install -y --setopt=install_weak_deps=False gcc && dnf clean all\n    mkdir -p /opt/hello\n    printf '%s\\n' '#include <stdio.h>' 'int main(void) { puts(\"hello from a program compiled in the container\"); return 0; }' > /opt/hello/hello.c\n    gcc -O2 -o /opt/hello/hello /opt/hello/hello.c\n\n%runscript\n    exec /opt/hello/hello\n\n%test\n    /opt/hello/hello\n",
+      "image_name": "rocky9-gcc-siteca.sif",
+      "output_dir": "${HOME}/pw/software/containers",
+      "test_command": "/opt/hello/hello"
+    },
+    "build": {
+      "fakeroot": true,
+      "timeout_min": 30,
+      "options": "",
+      "environment": "",
+      "cache_dir": "",
+      "tmp_dir": ""
+    }
+  }
+}

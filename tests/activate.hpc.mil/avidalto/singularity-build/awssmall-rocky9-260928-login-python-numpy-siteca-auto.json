@@ -1,0 +1,30 @@
+{
+  "name": "awssmall-rocky9-260928-login-python-numpy-siteca-auto",
+  "platform": "activate.hpc.mil",
+  "user": "avidalto",
+  "workflow_name": "singularity-build",
+  "workflow": {
+    "repo": "github.com/parallelworks/probe-tests-activate-parallel-works",
+    "path": "workflows/activate.hpc.mil/singularity-build/yamls/hsp.yaml",
+    "ref": "hsp-tests-singularity"
+  },
+  "timeout_s": 3600,
+  "warm_marker": "${HOME}/pw/software/containers/.cache/cache/blob",
+  "inputs": {
+    "resource": "pw://avidalto/awssmall",
+    "container": {
+      "definition": "Bootstrap: docker\nFrom: python:3.12-slim\n\n%files\n    site-ca-bundle.crt /etc/pw-site-ca.crt\n\n%post\n    # the login node's CA bundle: a site whose proxy re-signs HTTPS is trusted in the build\n    export SSL_CERT_FILE=/etc/pw-site-ca.crt PIP_CERT=/etc/pw-site-ca.crt REQUESTS_CA_BUNDLE=/etc/pw-site-ca.crt CURL_CA_BUNDLE=/etc/pw-site-ca.crt GIT_SSL_CAINFO=/etc/pw-site-ca.crt\n    pip install --no-cache-dir numpy==2.3.3\n\n%environment\n    export PYTHONUNBUFFERED=1\n    export SSL_CERT_FILE=/etc/pw-site-ca.crt PIP_CERT=/etc/pw-site-ca.crt REQUESTS_CA_BUNDLE=/etc/pw-site-ca.crt CURL_CA_BUNDLE=/etc/pw-site-ca.crt\n\n%runscript\n    exec python \"$@\"\n\n%test\n    python -c \"import numpy; print('numpy', numpy.__version__)\"\n",
+      "image_name": "python-numpy-siteca.sif",
+      "output_dir": "${HOME}/pw/software/containers",
+      "test_command": "python -c \"import numpy; print('numpy', numpy.__version__)\""
+    },
+    "build": {
+      "fakeroot": false,
+      "timeout_min": 30,
+      "options": "",
+      "environment": "",
+      "cache_dir": "",
+      "tmp_dir": ""
+    }
+  }
+}
